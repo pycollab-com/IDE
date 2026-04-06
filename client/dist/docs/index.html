@@ -1,0 +1,260 @@
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PyCollab Design System Docs</title>
+    <meta name="description" content="PyCollab design system documentation" />
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link
+      href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap"
+      rel="stylesheet"
+    />
+    <link rel="icon" href="./favicon.ico" sizes="any" />
+    <link rel="shortcut icon" href="./favicon.ico" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="docs-header" role="banner">
+      <div class="header-top">
+        <div class="header-left">
+          <img class="logo-icon" src="./favicon.ico" alt="PyCollab logo" width="18" height="18" />
+          <strong>PyCollab Docs</strong>
+          <span class="header-sep">|</span>
+          <span class="muted">English</span>
+        </div>
+
+        <label class="search-wrap" aria-label="Search docs">
+          <span class="search-icon" aria-hidden="true">⌕</span>
+          <input type="search" placeholder="Search docs..." />
+          <kbd>⌘K</kbd>
+        </label>
+
+        <div class="header-actions">
+          <a href="#">GitHub</a>
+          <a href="#">Releases</a>
+          <button id="theme-toggle" type="button" aria-label="Toggle theme">Theme</button>
+        </div>
+      </div>
+
+      <nav class="header-nav" aria-label="Primary">
+        <a href="#overview">Get started</a>
+        <a href="#foundations">Foundations</a>
+        <a href="#components">Components</a>
+        <a href="#patterns">Patterns</a>
+        <a href="#tokens" class="is-active">Tokens</a>
+        <a href="#implementation">Implementation</a>
+        <a href="#principles">Guidelines</a>
+      </nav>
+    </header>
+
+    <div class="docs-shell">
+      <aside class="left-nav" aria-label="Section navigation">
+        <p class="nav-group-title">Foundations</p>
+        <a href="#foundations">Color system</a>
+        <a href="#foundations">Typography</a>
+        <a href="#foundations">Layout grid</a>
+        <a href="#foundations">Spacing scale</a>
+
+        <p class="nav-group-title">Core Library</p>
+        <a href="#components">Navigation</a>
+        <a href="#components">Input</a>
+        <a href="#components">Feedback</a>
+        <a href="#components">Data display</a>
+        <a href="#components">Media</a>
+        <a href="#components">Collaboration</a>
+
+        <p class="nav-group-title">System</p>
+        <a href="#patterns">Patterns</a>
+        <a href="#tokens">Tokens</a>
+        <a href="#principles">Principles</a>
+        <a href="#dos-donts">Do's and Don'ts</a>
+        <a href="#implementation">Implementation guide</a>
+      </aside>
+
+      <main id="main" class="docs-main" tabindex="-1">
+        <article id="overview" class="doc-section">
+          <p class="eyebrow">Web interfaces</p>
+          <h1>PyCollab Design System</h1>
+          <p class="lead">
+            A comprehensive UI foundation for real-time collaborative Python workspaces. Built with Apple HIG principles of clarity,
+            deference, and depth.
+          </p>
+          <ul class="inline-meta">
+            <li><strong>Version:</strong> 1.0.0</li>
+            <li><strong>Date:</strong> February 22, 2026</li>
+            <li><strong>Audience:</strong> Students, educators, and small engineering teams</li>
+          </ul>
+        </article>
+
+        <section id="foundations" class="doc-section">
+          <h2>Foundations</h2>
+          <p>Color, typography, spacing, and layout rules that define the entire product UI.</p>
+
+          <h3>Primary palette</h3>
+          <div id="primary-palette" class="swatch-grid" role="list"></div>
+
+          <h3>Semantic colors</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Token</th>
+                  <th>Light</th>
+                  <th>Dark</th>
+                  <th>Use</th>
+                </tr>
+              </thead>
+              <tbody id="semantic-table"></tbody>
+            </table>
+          </div>
+
+          <h3>Dark mode equivalents</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Light</th>
+                  <th>Dark</th>
+                  <th>Contrast on #121113</th>
+                </tr>
+              </thead>
+              <tbody id="dark-equivalents-table"></tbody>
+            </table>
+          </div>
+
+          <h3>Color usage rules</h3>
+          <ol id="color-rules"></ol>
+
+          <h3>Typography scale</h3>
+          <p>
+            Font pairing: <code>SF Pro Display/Text</code> for UI + <code>SF Mono</code> for code. Includes 9 weights and 8 text roles.
+          </p>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Role</th>
+                  <th>Desktop</th>
+                  <th>Tablet</th>
+                  <th>Mobile</th>
+                </tr>
+              </thead>
+              <tbody id="typography-table"></tbody>
+            </table>
+          </div>
+
+          <h3>Weight system</h3>
+          <ul id="weight-list" class="weight-list"></ul>
+
+          <h3>Legibility requirements</h3>
+          <ol id="legibility-rules"></ol>
+
+          <h3>12-column responsive grid</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Viewport</th>
+                  <th>Width</th>
+                  <th>Columns</th>
+                  <th>Gutter</th>
+                  <th>Margin</th>
+                </tr>
+              </thead>
+              <tbody id="grid-table"></tbody>
+            </table>
+          </div>
+
+          <div class="grid-demo" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span><span></span>
+            <span></span><span></span><span></span><span></span><span></span><span></span>
+          </div>
+
+          <h3>Breakpoints</h3>
+          <ul id="breakpoint-list"></ul>
+
+          <h3>Safe areas</h3>
+          <ul id="safe-area-rules"></ul>
+
+          <h3>Spacing scale</h3>
+          <div id="spacing-scale" class="spacing-scale"></div>
+        </section>
+
+        <section id="components" class="doc-section">
+          <h2>Components</h2>
+          <p>47 components with anatomy, state matrix, usage guidance, accessibility, and code specs.</p>
+
+          <div class="component-toolbar">
+            <label for="component-filter">Category</label>
+            <select id="component-filter" aria-label="Filter components by category">
+              <option value="all">All</option>
+            </select>
+            <p id="component-count" class="component-count"></p>
+          </div>
+          <div id="component-list" class="component-list"></div>
+        </section>
+
+        <section id="patterns" class="doc-section">
+          <h2>Patterns</h2>
+          <p>Page templates, user flows, and feedback behavior standards.</p>
+          <div class="pattern-grid" id="pattern-grid"></div>
+        </section>
+
+        <section id="tokens" class="doc-section">
+          <h2>Design Tokens</h2>
+          <p>
+            Source of truth:
+            <a href="./pycollab-design-tokens.json" target="_blank" rel="noreferrer">pycollab-design-tokens.json</a>
+          </p>
+          <div class="token-actions">
+            <button id="copy-tokens" type="button">Copy JSON</button>
+            <a class="download-link" href="./pycollab-design-tokens.json" download>Download JSON</a>
+            <span id="copy-status" aria-live="polite"></span>
+          </div>
+          <pre id="token-preview" class="token-preview" tabindex="0"></pre>
+        </section>
+
+        <section id="principles" class="doc-section">
+          <h2>Design Principles</h2>
+          <div id="principle-grid" class="principle-grid"></div>
+        </section>
+
+        <section id="dos-donts" class="doc-section">
+          <h2>Do's and Don'ts</h2>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>#</th>
+                  <th>Do</th>
+                  <th>Don't</th>
+                  <th>Visual Description</th>
+                </tr>
+              </thead>
+              <tbody id="dos-donts-table"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="implementation" class="doc-section">
+          <h2>Implementation Guide</h2>
+          <ol id="implementation-steps"></ol>
+
+          <h3>Handoff checklist</h3>
+          <ul id="handoff-checklist"></ul>
+        </section>
+      </main>
+
+      <aside class="right-toc" aria-label="On this page">
+        <p class="toc-title">On this page</p>
+        <nav id="toc-list"></nav>
+      </aside>
+    </div>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>

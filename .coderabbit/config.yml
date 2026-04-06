@@ -1,0 +1,8 @@
+# .coderabbit/config.yml or .coderabbit.yaml
+
+reviews:
+  commit_status: true      
+
+  fail_commit_status: true 
+
+  review_status: true

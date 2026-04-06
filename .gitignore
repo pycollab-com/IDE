@@ -1,0 +1,9 @@
+__pycache__/
+.venv/
+env/
+*.pyc
+node_modules/
+# dist/ removed - we want to track built files for deployment
+*.db
+.DS_Store
+.env
