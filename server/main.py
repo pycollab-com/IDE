@@ -77,6 +77,8 @@ SHARE_TOKEN_LENGTH = 6
 SHARE_TOKEN_RE = re.compile(rf"^[{SHARE_TOKEN_ALPHABET}]{{{SHARE_TOKEN_LENGTH}}}$")
 PROJECT_TYPE_NORMAL = "normal"
 PROJECT_TYPE_PYBRICKS = "pybricks"
+EDITOR_MODE_TEXT = "text"
+EDITOR_MODE_BLOCKS = "blocks"
 NORMAL_PROJECT_STARTER = "# main entry point\n\nprint('Hello from your new project!')\n"
 PYBRICKS_PROJECT_STARTER = """from pybricks.hubs import PrimeHub
 from pybricks.tools import wait
@@ -87,6 +89,47 @@ while True:
     print("PyBricks project ready")
     wait(1000)
 """
+DEFAULT_BLOCK_DOCUMENT_NAME = "Blocks"
+BLOCK_WORKSPACE_VERSION = 1
+PYBRICKS_BLOCKS_STARTER = json.dumps(
+    {
+        "blocks": {
+            "languageVersion": 0,
+            "blocks": [
+                {
+                    "type": "blockGlobalSetup",
+                    "id": "pycollab-upstream-setup",
+                    "x": 150,
+                    "y": 100,
+                    "deletable": False,
+                },
+                {
+                    "type": "blockGlobalStart",
+                    "id": "pycollab-upstream-program",
+                    "x": 150,
+                    "y": 300,
+                    "deletable": False,
+                    "next": {
+                        "block": {
+                            "type": "blockPrint",
+                            "id": "pycollab-upstream-print",
+                            "extraState": {"optionLevel": 0},
+                            "inputs": {
+                                "TEXT0": {
+                                    "shadow": {
+                                        "type": "text",
+                                        "id": "pycollab-upstream-print-text",
+                                        "fields": {"TEXT": "Hello, world!"},
+                                    }
+                                }
+                            },
+                        }
+                    },
+                }
+            ]
+        },
+    }
+)
 
 message_presence = PresenceManager(stale_seconds=PRESENCE_STALE_SECONDS)
 typing_manager = TypingManager(
@@ -272,6 +315,29 @@ _file_locks: Dict[int, asyncio.Lock] = {}
 _sid_info: Dict[str, Dict[str, Any]] = {}  # sid -> {user_id, is_admin, project_id}
 
 
+@dataclass
+class _BlockOp:
+    op_id: str
+    user_id: int
+    event: Dict[str, Any]
+    workspace_json: Optional[str] = None
+    ts: float = field(default_factory=time.monotonic)
+
+
+@dataclass
+class _BlockSyncState:
+    project_id: int
+    workspace_json: str
+    rev: int = 0
+    base_rev: int = 0
+    ops: List[_BlockOp] = field(default_factory=list)
+    persist_task: Optional[asyncio.Task] = None
+
+
+_block_states: Dict[int, _BlockSyncState] = {}
+_block_locks: Dict[int, asyncio.Lock] = {}
+
+
 def _apply_changeset(text: str, changeset: Any) -> Optional[str]:
     """
     Apply a CodeMirror ChangeSet JSON representation (ChangeSet.toJSON()) to `text`.
@@ -327,6 +393,28 @@ def _ensure_file_state(db: Session, project_id: int, file_id: int) -> Optional[_
     return state
 
 
+def _ensure_block_state(db: Session, project_id: int, document_id: int) -> Optional[_BlockSyncState]:
+    state = _block_states.get(document_id)
+    if state and state.project_id == project_id:
+        return state
+
+    doc = (
+        db.query(models.ProjectBlockDocument)
+        .filter(
+            models.ProjectBlockDocument.id == document_id,
+            models.ProjectBlockDocument.project_id == project_id,
+        )
+        .first()
+    )
+    if not doc:
+        return None
+
+    state = _BlockSyncState(project_id=project_id, workspace_json=doc.workspace_json or "{}")
+    _block_states[document_id] = state
+    _block_locks.setdefault(document_id, asyncio.Lock())
+    return state
+
+
 async def _persist_file_to_db(file_id: int):
     try:
         await asyncio.sleep(PERSIST_DEBOUNCE_SECONDS)
@@ -365,6 +453,50 @@ def _schedule_persist(file_id: int):
     if state.persist_task and not state.persist_task.done():
         state.persist_task.cancel()
     state.persist_task = asyncio.create_task(_persist_file_to_db(file_id))
+
+
+async def _persist_block_to_db(document_id: int):
+    try:
+        await asyncio.sleep(PERSIST_DEBOUNCE_SECONDS)
+        lock = _block_locks.get(document_id)
+        state = _block_states.get(document_id)
+        if not lock or not state:
+            return
+        async with lock:
+            workspace_json = state.workspace_json
+            project_id = state.project_id
+
+        db = SessionLocal()
+        try:
+            doc = (
+                db.query(models.ProjectBlockDocument)
+                .filter(
+                    models.ProjectBlockDocument.id == document_id,
+                    models.ProjectBlockDocument.project_id == project_id,
+                )
+                .first()
+            )
+            if doc:
+                doc.workspace_json = workspace_json
+                doc.workspace_version = BLOCK_WORKSPACE_VERSION
+                db.commit()
+        finally:
+            db.close()
+    except asyncio.CancelledError:
+        return
+    finally:
+        state = _block_states.get(document_id)
+        if state and state.persist_task is asyncio.current_task():
+            state.persist_task = None
+
+
+def _schedule_block_persist(document_id: int):
+    state = _block_states.get(document_id)
+    if not state:
+        return
+    if state.persist_task and not state.persist_task.done():
+        state.persist_task.cancel()
+    state.persist_task = asyncio.create_task(_persist_block_to_db(document_id))
 
 
 def _pair_key(user_a_id: int, user_b_id: int):
@@ -622,6 +754,47 @@ def _project_starter_content(project_type: str) -> str:
     if project_type == PROJECT_TYPE_PYBRICKS:
         return PYBRICKS_PROJECT_STARTER
     return NORMAL_PROJECT_STARTER
+
+
+def _default_project_editor_mode(project_type: str) -> str:
+    return EDITOR_MODE_TEXT
+
+
+def _project_block_document_payload(document: models.ProjectBlockDocument, *, rev: Optional[int] = None) -> Dict[str, Any]:
+    payload = {
+        "id": document.id,
+        "name": document.name,
+        "workspace_json": document.workspace_json or "{}",
+        "workspace_version": document.workspace_version or BLOCK_WORKSPACE_VERSION,
+        "generated_entry_module": document.generated_entry_module or "main.py",
+    }
+    if rev is not None:
+        payload["rev"] = rev
+    return payload
+
+
+def _derive_block_entry_module(name: Optional[str], fallback: str = "main.py") -> str:
+    raw_name = (name or "").strip().lower()
+    stem = re.sub(r"[^a-z0-9._-]+", "_", raw_name).strip("._-")
+    if not stem:
+        return fallback
+    if stem.endswith(".py"):
+        return stem
+    return f"{stem}.py"
+
+
+def _create_default_block_document(db: Session, project: models.Project) -> models.ProjectBlockDocument:
+    block_document = models.ProjectBlockDocument(
+        project_id=project.id,
+        name=DEFAULT_BLOCK_DOCUMENT_NAME,
+        workspace_json=PYBRICKS_BLOCKS_STARTER,
+        workspace_version=BLOCK_WORKSPACE_VERSION,
+        generated_entry_module="main.py",
+    )
+    db.add(block_document)
+    db.flush()
+    project.entry_block_document_id = block_document.id
+    return block_document
 
 
 def _generate_project_public_id() -> str:
@@ -940,6 +1113,94 @@ def startup_db_client():
                 trans.rollback()
                 print(f"Migration warning (ix_projects_project_type): {e}")
 
+            # Check editor_mode on projects
+            col_editor_mode_exists = False
+            trans = conn.begin()
+            try:
+                conn.execute(text("SELECT editor_mode FROM projects LIMIT 1"))
+                trans.commit()
+                col_editor_mode_exists = True
+            except Exception:
+                trans.rollback()
+                col_editor_mode_exists = False
+
+            if not col_editor_mode_exists:
+                trans = conn.begin()
+                try:
+                    conn.execute(text("ALTER TABLE projects ADD COLUMN editor_mode VARCHAR DEFAULT 'text'"))
+                    conn.execute(
+                        text(
+                            "UPDATE projects SET editor_mode = 'text' "
+                            "WHERE editor_mode IS NULL OR editor_mode = ''"
+                        )
+                    )
+                    trans.commit()
+                    print("Migration successful: Added editor_mode column to projects.")
+                except Exception as e:
+                    trans.rollback()
+                    print(f"Migration warning (editor_mode): {e}")
+
+            # Check entry_block_document_id on projects
+            col_entry_block_document_exists = False
+            trans = conn.begin()
+            try:
+                conn.execute(text("SELECT entry_block_document_id FROM projects LIMIT 1"))
+                trans.commit()
+                col_entry_block_document_exists = True
+            except Exception:
+                trans.rollback()
+                col_entry_block_document_exists = False
+
+            if not col_entry_block_document_exists:
+                trans = conn.begin()
+                try:
+                    conn.execute(text("ALTER TABLE projects ADD COLUMN entry_block_document_id INTEGER"))
+                    trans.commit()
+                    print("Migration successful: Added entry_block_document_id column to projects.")
+                except Exception as e:
+                    trans.rollback()
+                    print(f"Migration warning (entry_block_document_id): {e}")
+
+            trans = conn.begin()
+            try:
+                conn.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS project_block_documents ("
+                        "id INTEGER PRIMARY KEY, "
+                        "project_id INTEGER NOT NULL, "
+                        "name VARCHAR NOT NULL, "
+                        "workspace_json TEXT NOT NULL DEFAULT '{}', "
+                        "workspace_version INTEGER NOT NULL DEFAULT 1, "
+                        "generated_entry_module VARCHAR NOT NULL DEFAULT 'main.py', "
+                        "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                        "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                        "FOREIGN KEY(project_id) REFERENCES projects(id)"
+                        ")"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_project_block_document_name "
+                        "ON project_block_documents (project_id, name)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_project_block_documents_project_id "
+                        "ON project_block_documents (project_id)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_projects_entry_block_document_id "
+                        "ON projects (entry_block_document_id)"
+                    )
+                )
+                trans.commit()
+            except Exception as e:
+                trans.rollback()
+                print(f"Migration warning (project_block_documents): {e}")
+
             # Check public_id on projects
             col_public_id_exists = False
             trans = conn.begin()
@@ -1079,7 +1340,7 @@ def startup_db_client():
                 _tables_with_serial_pk = [
                     "users", "projects", "project_files", "project_collaborators",
                     "project_share_tokens", "project_tasks", "project_snapshots",
-                    "project_snapshot_files",
+                    "project_snapshot_files", "project_block_documents",
                 ]
                 trans = conn.begin()
                 try:
@@ -1260,6 +1521,9 @@ def _delete_user_dependencies(db: Session, user_id: int):
         pid for (pid,) in db.query(models.Project.id).filter(models.Project.owner_id == user_id).all()
     ]
     if owned_project_ids:
+        db.query(models.ProjectBlockDocument).filter(
+            models.ProjectBlockDocument.project_id.in_(owned_project_ids)
+        ).delete(synchronize_session=False)
         snapshot_ids = [
             sid
             for (sid,) in db.query(models.ProjectSnapshot.id).filter(
@@ -1767,13 +2031,15 @@ def create_project(project_in: schemas.ProjectCreate, current_user: models.User 
     project = models.Project(
         name=project_in.name,
         project_type=project_in.project_type,
+        editor_mode=_default_project_editor_mode(project_in.project_type),
         description=project_in.description,
         owner_id=current_user.id,
         is_public=project_in.is_public,
     )
     db.add(project)
-    db.commit()
-    db.refresh(project)
+    db.flush()
+    if project.project_type == PROJECT_TYPE_PYBRICKS:
+        _create_default_block_document(db, project)
     # default file
     default_file = models.ProjectFile(
         project_id=project.id,
@@ -1800,10 +2066,13 @@ def _enrich_projects_with_owner(db: Session, projects):
             "name": p.name,
             "project_type": p.project_type or PROJECT_TYPE_NORMAL,
             "description": p.description,
+            "editor_mode": p.editor_mode or _default_project_editor_mode(p.project_type or PROJECT_TYPE_NORMAL),
+            "entry_block_document_id": p.entry_block_document_id,
             "owner_id": p.owner_id,
             "owner_name": owner.display_name if owner else "Unknown",
             "is_public": p.is_public,
             "files": p.files,
+            "block_documents": p.block_documents,
             "collaborators": p.collaborators
         }
         result.append(p_dict)
@@ -1872,6 +2141,7 @@ def duplicate_project(
     duplicated_project = models.Project(
         name=duplicate_name,
         project_type=source_project.project_type or PROJECT_TYPE_NORMAL,
+        editor_mode=source_project.editor_mode or _default_project_editor_mode(source_project.project_type or PROJECT_TYPE_NORMAL),
         description=source_project.description,
         owner_id=current_user.id,
         is_public=False,
@@ -1892,6 +2162,28 @@ def duplicate_project(
                 content=source_file.content or "",
             )
         )
+
+    source_block_documents = (
+        db.query(models.ProjectBlockDocument)
+        .filter(models.ProjectBlockDocument.project_id == source_project.id)
+        .all()
+    )
+    duplicated_entry_block_document_id = None
+    for source_block_document in source_block_documents:
+        duplicated_block_document = models.ProjectBlockDocument(
+            project_id=duplicated_project.id,
+            name=source_block_document.name,
+            workspace_json=source_block_document.workspace_json or "{}",
+            workspace_version=source_block_document.workspace_version or BLOCK_WORKSPACE_VERSION,
+            generated_entry_module=source_block_document.generated_entry_module or "main.py",
+        )
+        db.add(duplicated_block_document)
+        db.flush()
+        if source_project.entry_block_document_id == source_block_document.id:
+            duplicated_entry_block_document_id = duplicated_block_document.id
+
+    if duplicated_entry_block_document_id is not None:
+        duplicated_project.entry_block_document_id = duplicated_entry_block_document_id
 
     db.commit()
     db.refresh(duplicated_project)
@@ -1916,6 +2208,30 @@ def add_file(project_id: int, file_in: schemas.FileCreate, current_user: models.
     return pf
 
 
+@app.post("/projects/{project_id}/block-documents", response_model=schemas.ProjectBlockDocumentOut)
+def add_block_document(
+    project_id: int,
+    document_in: schemas.ProjectBlockDocumentCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = _ensure_project_access(db, project_id, current_user, require_write=True)
+    document = models.ProjectBlockDocument(
+        project_id=project_id,
+        name=document_in.name,
+        workspace_json=document_in.workspace_json or PYBRICKS_BLOCKS_STARTER,
+        workspace_version=document_in.workspace_version or BLOCK_WORKSPACE_VERSION,
+        generated_entry_module=document_in.generated_entry_module or _derive_block_entry_module(document_in.name),
+    )
+    db.add(document)
+    db.flush()
+    if project.entry_block_document_id is None:
+        project.entry_block_document_id = document.id
+    db.commit()
+    db.refresh(document)
+    return document
+
+
 @app.patch("/projects/{project_id}/files/{file_id}", response_model=schemas.ProjectFileOut)
 def update_file(project_id: int, file_id: int, file_in: schemas.FileUpdate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     _ensure_project_access(db, project_id, current_user, require_write=True)
@@ -1938,6 +2254,75 @@ def delete_file(project_id: int, file_id: int, current_user: models.User = Depen
     if not pf:
         raise HTTPException(status_code=404, detail="File not found")
     db.delete(pf)
+    db.commit()
+    return {"status": "deleted"}
+
+
+@app.patch("/projects/{project_id}/block-documents/{document_id}", response_model=schemas.ProjectBlockDocumentOut)
+def update_block_document(
+    project_id: int,
+    document_id: int,
+    document_in: schemas.ProjectBlockDocumentUpdate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ensure_project_access(db, project_id, current_user, require_write=True)
+    document = (
+        db.query(models.ProjectBlockDocument)
+        .filter(
+            models.ProjectBlockDocument.id == document_id,
+            models.ProjectBlockDocument.project_id == project_id,
+        )
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Block document not found")
+    if document_in.name is not None:
+        document.name = document_in.name
+        if document_in.generated_entry_module is None:
+            document.generated_entry_module = _derive_block_entry_module(document_in.name)
+    if document_in.workspace_json is not None:
+        document.workspace_json = document_in.workspace_json
+    if document_in.workspace_version is not None:
+        document.workspace_version = document_in.workspace_version
+    if document_in.generated_entry_module is not None:
+        document.generated_entry_module = document_in.generated_entry_module
+    db.commit()
+    db.refresh(document)
+    return document
+
+
+@app.delete("/projects/{project_id}/block-documents/{document_id}")
+def delete_block_document(
+    project_id: int,
+    document_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    project = _ensure_project_access(db, project_id, current_user, require_write=True)
+    document = (
+        db.query(models.ProjectBlockDocument)
+        .filter(
+            models.ProjectBlockDocument.id == document_id,
+            models.ProjectBlockDocument.project_id == project_id,
+        )
+        .first()
+    )
+    if not document:
+        raise HTTPException(status_code=404, detail="Block document not found")
+
+    db.delete(document)
+    db.flush()
+
+    if project.entry_block_document_id == document_id:
+        replacement = (
+            db.query(models.ProjectBlockDocument)
+            .filter(models.ProjectBlockDocument.project_id == project_id)
+            .order_by(models.ProjectBlockDocument.created_at.asc(), models.ProjectBlockDocument.id.asc())
+            .first()
+        )
+        project.entry_block_document_id = replacement.id if replacement else None
+
     db.commit()
     return {"status": "deleted"}
 
@@ -2397,10 +2782,24 @@ async def restore_project_snapshot(
                 "rev": state.rev,
             }
         )
+    payload_block_documents = []
+    block_documents = (
+        db.query(models.ProjectBlockDocument)
+        .filter(models.ProjectBlockDocument.project_id == project_id)
+        .order_by(models.ProjectBlockDocument.created_at.asc(), models.ProjectBlockDocument.id.asc())
+        .all()
+    )
+    for block_document in block_documents:
+        state = _block_states.get(block_document.id)
+        if not state or state.project_id != project_id:
+            state = _BlockSyncState(project_id=project_id, workspace_json=block_document.workspace_json or "{}")
+            _block_states[block_document.id] = state
+            _block_locks.setdefault(block_document.id, asyncio.Lock())
+        payload_block_documents.append(_project_block_document_payload(block_document, rev=state.rev))
     payload_tasks = [_project_task_payload(task) for task in tasks]
     await sio.emit(
         "project_state",
-        {"projectId": project_id, "files": payload_files, "tasks": payload_tasks},
+        {"projectId": project_id, "files": payload_files, "blockDocuments": payload_block_documents, "tasks": payload_tasks},
         room=f"project_{project_id}",
     )
 
@@ -2758,6 +3157,7 @@ async def connect(sid, environ, auth=None):
             "name": getattr(user, 'display_name', user.username), 
             "color": color, 
             "cursor": None, 
+            "block_presence": None,
             "avatar": user.profile_picture_path,
             "is_admin": user.is_admin
         }
@@ -2779,6 +3179,12 @@ async def connect(sid, environ, auth=None):
             .order_by(models.ProjectTask.is_done.asc(), models.ProjectTask.created_at.desc(), models.ProjectTask.id.desc())
             .all()
         )
+        block_documents = (
+            db2.query(models.ProjectBlockDocument)
+            .filter(models.ProjectBlockDocument.project_id == pid)
+            .order_by(models.ProjectBlockDocument.created_at.asc(), models.ProjectBlockDocument.id.asc())
+            .all()
+        )
         payload_files = []
         for f in files:
             state = _file_states.get(f.id)
@@ -2787,6 +3193,14 @@ async def connect(sid, environ, auth=None):
                 _file_states[f.id] = state
                 _file_locks.setdefault(f.id, asyncio.Lock())
             payload_files.append({"id": f.id, "name": f.name, "content": state.content, "rev": state.rev})
+        payload_block_documents = []
+        for block_document in block_documents:
+            state = _block_states.get(block_document.id)
+            if not state or state.project_id != pid:
+                state = _BlockSyncState(project_id=pid, workspace_json=block_document.workspace_json or "{}")
+                _block_states[block_document.id] = state
+                _block_locks.setdefault(block_document.id, asyncio.Lock())
+            payload_block_documents.append(_project_block_document_payload(block_document, rev=state.rev))
         payload_tasks = [_project_task_payload(task) for task in tasks]
         payload_voice = _voice_participants_payload(pid)
     finally:
@@ -2796,6 +3210,7 @@ async def connect(sid, environ, auth=None):
         {
             "projectId": pid,
             "files": payload_files,
+            "blockDocuments": payload_block_documents,
             "tasks": payload_tasks,
             "voiceParticipants": payload_voice,
         },
@@ -3169,6 +3584,173 @@ async def sync_file(sid, data):
         await sio.emit("file_ops", {"projectId": pid, "fileId": fid, "rev": state.rev, "ops": ops}, room=sid)
 
 
+@sio.event
+async def blocks_op(sid, data):
+    project_id = data.get("projectId")
+    document_id = data.get("documentId")
+    base_rev = data.get("baseRev")
+    op_id = data.get("opId")
+    event = data.get("event")
+    workspace_json = data.get("workspaceJson")
+
+    if project_id is None or document_id is None or base_rev is None or op_id is None:
+        return
+
+    try:
+        pid = int(project_id)
+        did = int(document_id)
+        client_rev = int(base_rev)
+    except (TypeError, ValueError):
+        return
+
+    if not isinstance(op_id, str) or not op_id:
+        return
+    if not isinstance(event, dict):
+        event = {}
+    if workspace_json is not None and not isinstance(workspace_json, str):
+        workspace_json = None
+
+    session = _sid_info.get(sid)
+    if not session or session.get("project_id") != pid or not session.get("can_edit"):
+        return
+
+    user_id = int(session["user_id"])
+    state = _block_states.get(did)
+    if not state or state.project_id != pid:
+        db = SessionLocal()
+        try:
+            state = _ensure_block_state(db, pid, did)
+            if not state:
+                return
+        finally:
+            db.close()
+
+    lock = _block_locks.setdefault(did, asyncio.Lock())
+    async with lock:
+        state = _block_states.get(did)
+        if not state or state.project_id != pid:
+            return
+
+        if client_rev != state.rev:
+            if client_rev < state.base_rev or client_rev > state.rev:
+                await sio.emit(
+                    "blocks_snapshot",
+                    {"projectId": pid, "documentId": did, "rev": state.rev, "workspaceJson": state.workspace_json, "opId": op_id},
+                    room=sid,
+                )
+                return
+
+            start_idx = client_rev - state.base_rev
+            ops = []
+            for idx in range(start_idx, len(state.ops)):
+                op = state.ops[idx]
+                ops.append(
+                    {
+                        "rev": state.base_rev + idx + 1,
+                        "event": op.event,
+                        "opId": op.op_id,
+                        "userId": op.user_id,
+                        "workspaceJson": op.workspace_json,
+                    }
+                )
+            await sio.emit(
+                "blocks_op_reject",
+                {"projectId": pid, "documentId": did, "expectedRev": state.rev, "opId": op_id, "ops": ops},
+                room=sid,
+            )
+            return
+
+        if workspace_json is not None:
+            state.workspace_json = workspace_json
+        state.ops.append(_BlockOp(op_id=op_id, user_id=user_id, event=event, workspace_json=workspace_json))
+        state.rev += 1
+
+        if len(state.ops) > MAX_FILE_OPS_BUFFER:
+            trim = len(state.ops) - MAX_FILE_OPS_BUFFER
+            del state.ops[:trim]
+            state.base_rev += trim
+
+        new_rev = state.rev
+
+    _schedule_block_persist(did)
+
+    await sio.emit(
+        "blocks_op",
+        {
+            "projectId": pid,
+            "documentId": did,
+            "event": event,
+            "rev": new_rev,
+            "opId": op_id,
+            "userId": user_id,
+            "workspaceJson": workspace_json,
+        },
+        room=f"project_{pid}",
+        skip_sid=sid,
+    )
+    await sio.emit("blocks_op_ack", {"projectId": pid, "documentId": did, "opId": op_id, "rev": new_rev}, room=sid)
+
+
+@sio.event
+async def blocks_sync_request(sid, data):
+    project_id = data.get("projectId")
+    document_id = data.get("documentId")
+    from_rev = data.get("fromRev")
+    if project_id is None or document_id is None:
+        return
+    try:
+        pid = int(project_id)
+        did = int(document_id)
+        from_rev_int = int(from_rev) if from_rev is not None else None
+    except (TypeError, ValueError):
+        return
+
+    session = _sid_info.get(sid)
+    if not session or session.get("project_id") != pid:
+        return
+
+    db = SessionLocal()
+    try:
+        state = _ensure_block_state(db, pid, did)
+        if not state:
+            return
+    finally:
+        db.close()
+
+    lock = _block_locks.setdefault(did, asyncio.Lock())
+    async with lock:
+        state = _block_states.get(did)
+        if not state or state.project_id != pid:
+            return
+
+        if from_rev_int is None or from_rev_int < state.base_rev or from_rev_int > state.rev:
+            await sio.emit(
+                "blocks_snapshot",
+                {"projectId": pid, "documentId": did, "rev": state.rev, "workspaceJson": state.workspace_json},
+                room=sid,
+            )
+            return
+
+        if from_rev_int == state.rev:
+            await sio.emit("blocks_ops", {"projectId": pid, "documentId": did, "rev": state.rev, "ops": []}, room=sid)
+            return
+
+        start_idx = from_rev_int - state.base_rev
+        ops = []
+        for idx in range(start_idx, len(state.ops)):
+            op = state.ops[idx]
+            ops.append(
+                {
+                    "rev": state.base_rev + idx + 1,
+                    "event": op.event,
+                    "opId": op.op_id,
+                    "userId": op.user_id,
+                    "workspaceJson": op.workspace_json,
+                }
+            )
+        await sio.emit("blocks_ops", {"projectId": pid, "documentId": did, "rev": state.rev, "ops": ops}, room=sid)
+
+
 # Backwards compat: older clients emit `edit_file`
 @sio.event
 async def edit_file(sid, data):
@@ -3184,6 +3766,21 @@ async def cursor(sid, data):
     pid = int(project_id)
     if pid in presence and sid in presence[pid]:
         presence[pid][sid]["cursor"] = cursor_pos
+        await _broadcast_presence(pid)
+
+
+@sio.event
+async def blocks_presence(sid, data):
+    project_id = data.get("projectId")
+    block_presence = data.get("presence")
+    if project_id is None:
+        return
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return
+    if pid in presence and sid in presence[pid]:
+        presence[pid][sid]["block_presence"] = block_presence if isinstance(block_presence, dict) else None
         await _broadcast_presence(pid)
 
 
@@ -4513,13 +5110,15 @@ def admin_create_project_for_user(user_id: int, project_in: schemas.ProjectCreat
     project = models.Project(
         name=project_name,
         project_type=project_in.project_type,
+        editor_mode=_default_project_editor_mode(project_in.project_type),
         owner_id=user_id,
         is_public=project_in.is_public,
         description=project_in.description,
     )
     db.add(project)
-    db.commit()
-    db.refresh(project)
+    db.flush()
+    if project.project_type == PROJECT_TYPE_PYBRICKS:
+        _create_default_block_document(db, project)
     
     default_file = models.ProjectFile(
         project_id=project.id,

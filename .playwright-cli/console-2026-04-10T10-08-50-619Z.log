@@ -1,0 +1,7 @@
+[    4607ms] [LOG] starting Pyodide... @ https://beta.pybricks.com/static/js/7346.00d5129d.chunk.js:0
+[   17664ms] [LOG] Loading docstring_parser, jedi, parso, pybricks_jedi, pybricks, typing_extensions @ https://beta.pybricks.com/static/js/pyodide/0.24.1/pyodide.asm.js:0
+[   19456ms] [LOG] Loaded pybricks, jedi, docstring_parser, parso, typing_extensions, pybricks_jedi @ https://beta.pybricks.com/static/js/pyodide/0.24.1/pyodide.asm.js:0
+[   19915ms] [LOG] preloading pybricks_jedi... @ https://beta.pybricks.com/static/js/pyodide/0.24.1/pyodide.asm.js:0
+[   23133ms] [LOG] preloading done. @ https://beta.pybricks.com/static/js/pyodide/0.24.1/pyodide.asm.js:0
+[   23136ms] [LOG] Pyodide is ready. @ https://beta.pybricks.com/static/js/7346.00d5129d.chunk.js:0
+[  214677ms] [LOG] Content is cached for offline use. @ https://beta.pybricks.com/static/js/main.cfafc721.js:1

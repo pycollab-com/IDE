@@ -232,9 +232,18 @@ function findImportedModules(script) {
   return modules;
 }
 
-async function compileProjectFiles({ files, entryFileId, compileFn }) {
+async function compileProjectFiles({ files, entryFileId, entryFileName, entryFileContent, compileFn }) {
   const normalizedFiles = Array.isArray(files) ? files : [];
+  const derivedEntryFile =
+    typeof entryFileContent === "string"
+      ? {
+          id: entryFileId ?? -1,
+          name: entryFileName || "main.py",
+          content: entryFileContent,
+        }
+      : null;
   const entryFile =
+    derivedEntryFile ||
     normalizedFiles.find((file) => Number(file.id) === Number(entryFileId)) ||
     normalizedFiles.find((file) => String(file.name || "").toLowerCase() === "main.py") ||
     normalizedFiles[0];
@@ -245,6 +254,7 @@ async function compileProjectFiles({ files, entryFileId, compileFn }) {
 
   const localModules = new Map();
   normalizedFiles.forEach((file) => {
+    if (derivedEntryFile && String(file.name || "").trim() === derivedEntryFile.name) return;
     const moduleName = fileNameToModuleName(file.name);
     const path = fileNameToModulePath(file.name);
     if (!moduleName || !path) return;
@@ -864,7 +874,7 @@ export class PybricksRunner {
     }
   }
 
-  async run({ files, entryFileId }) {
+  async run({ files, entryFileId, entryFileName, entryFileContent }) {
     if (this.disposed) {
       throw new Error("Runner is disposed.");
     }
@@ -881,6 +891,8 @@ export class PybricksRunner {
     const compiled = await compileProjectFiles({
       files,
       entryFileId,
+      entryFileName,
+      entryFileContent,
       compileFn: this.compileFn,
     });
 

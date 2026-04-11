@@ -2272,6 +2272,41 @@ button {
 .es-search-input:focus { border-color: rgba(137, 152, 120, 0.5); background: rgba(247, 247, 242, 0.08); }
 
 /* ── Editor sidebar: file list ── */
+.es-create-file-menu-wrap {
+  position: relative;
+}
+
+.es-create-file-menu {
+  position: absolute;
+  top: calc(100% + 6px);
+  right: 0;
+  z-index: 12;
+  min-width: 148px;
+  padding: 6px;
+  border: 1px solid var(--border-color);
+  border-radius: 10px;
+  background: rgba(18, 17, 19, 0.96);
+  box-shadow: 0 12px 24px rgba(18, 17, 19, 0.24);
+}
+
+.es-create-file-option {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: #f7f7f2;
+  cursor: pointer;
+  text-align: left;
+}
+
+.es-create-file-option:hover {
+  background: rgba(247, 247, 242, 0.08);
+}
+
 .es-file-list {
   flex: 1;
   min-height: 72px;

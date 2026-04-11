@@ -9,6 +9,7 @@ import api, { API_BASE } from "../api";
 import { getToken } from "../auth";
 import PyodideRunner from "../runtime/pyodideRunner";
 import PybricksRunner from "../runtime/pybricksRunner";
+import PybricksBlocksEditor from "../pybricks-blocks/ui/PybricksBlocksEditor";
 import { motion, AnimatePresence } from "framer-motion";
 import { FiFile, FiFilePlus, FiUsers, FiShare2, FiLogOut, FiPlay, FiTerminal, FiChevronLeft, FiChevronDown, FiEdit2, FiTrash2, FiCopy, FiCheck, FiAlertCircle, FiSun, FiMoon, FiSidebar, FiSearch, FiMenu, FiHome, FiEye, FiEyeOff, FiX, FiSquare, FiMessageSquare, FiSend, FiCode, FiPlus, FiActivity, FiClock, FiZap, FiPhoneCall, FiPhoneOff, FiMic, FiMicOff, FiVolume2, FiRefreshCw, FiWifi, FiWifiOff, FiDownload, FiMoreVertical } from "react-icons/fi";
 import VerifiedBadge from "../components/VerifiedBadge";
@@ -226,8 +227,14 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
 
   const [project, setProject] = useState(null);
   const [files, setFiles] = useState([]);
+  const [blockDocuments, setBlockDocuments] = useState([]);
   const [currentFileId, setCurrentFileId] = useState(null);
   const currentFileIdRef = useRef(null);
+  const [currentBlockDocumentId, setCurrentBlockDocumentId] = useState(null);
+  const [activeEditorKind, setActiveEditorKind] = useState("file");
+  const [showGeneratedBlockCode, setShowGeneratedBlockCode] = useState(false);
+  const [generatedBlockCode, setGeneratedBlockCode] = useState("");
+  const generatedBlockCodeRef = useRef("");
   const [output, setOutput] = useState("");
   const [presence, setPresence] = useState([]);
   const presenceRef = useRef([]);
@@ -281,6 +288,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const [runHistory, setRunHistory] = useState([]);
   const [activeRunReplayId, setActiveRunReplayId] = useState(null);
   const [fileSearch, setFileSearch] = useState("");
+  const [createFileMenuOpen, setCreateFileMenuOpen] = useState(false);
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
   const editorViewRef = useRef(null);
@@ -288,6 +296,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const runnerRef = useRef(null);
   const collabRef = useRef({});
   const filesRef = useRef([]);
+  const blockDocumentsRef = useRef([]);
   const projectApiIdRef = useRef(null);
   const activityBootstrappedRef = useRef(false);
   const localStreamRef = useRef(null);
@@ -308,6 +317,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const runtimeEverReadyRef = useRef(false);
   const mirroredCursorRef = useRef({ fileId: null, from: -1, to: -1 });
   const sharePinCardRef = useRef(null);
+  const createFileMenuRef = useRef(null);
   const scrollSharePinIntoView = () => {
     requestAnimationFrame(() => {
       sharePinCardRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -401,6 +411,20 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   useEffect(() => {
     filesRef.current = files;
   }, [files]);
+
+  useEffect(() => {
+    blockDocumentsRef.current = blockDocuments;
+  }, [blockDocuments]);
+
+  useEffect(() => {
+    if (!createFileMenuOpen) return undefined;
+    const handlePointerDown = (event) => {
+      if (createFileMenuRef.current?.contains(event.target)) return;
+      setCreateFileMenuOpen(false);
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    return () => document.removeEventListener("mousedown", handlePointerDown);
+  }, [createFileMenuOpen]);
 
   const resolveUserName = (userId) => {
     if (userId === user?.id) return "You";
@@ -934,10 +958,13 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     }
   };
 
+  const isPybricksProject = projectUsesPybricks(project);
   const currentFile = files.find((f) => f.id === currentFileId);
+  const currentBlockDocument = blockDocuments.find((doc) => doc.id === currentBlockDocumentId) || null;
+  const hasBlockDocuments = blockDocuments.length > 0;
+  const isBlockEditorActive = isPybricksProject && hasBlockDocuments && activeEditorKind === "blocks" && !!currentBlockDocument;
   const projectApiId = project?.id ?? null;
   const socketProjectId = projectApiId != null ? String(projectApiId) : null;
-  const isPybricksProject = projectUsesPybricks(project);
   const pybricksConnectionBusy = pybricksHubState.status === "connecting";
   const pybricksRuntimeOnline = isPybricksProject ? pybricksHubState.connected : runtimeReady;
 
@@ -983,9 +1010,17 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       const resolvedProjectId = res.data.id;
       setProject(res.data);
       setFiles(res.data.files || []);
+      const incomingBlockDocuments = res.data.block_documents || [];
+      setBlockDocuments(incomingBlockDocuments);
       if (!currentFileId && res.data.files?.length) {
         setCurrentFileId(res.data.files[0].id);
       }
+      if (!currentBlockDocumentId && incomingBlockDocuments.length) {
+        setCurrentBlockDocumentId(incomingBlockDocuments[0].id);
+      }
+      const initialEditorKind = res.data.files?.length ? "file" : incomingBlockDocuments.length ? "blocks" : "file";
+      setActiveEditorKind(initialEditorKind);
+      setTerminalOpen(initialEditorKind !== "blocks");
 
       // Permission Check
       const isOwner = res.data.owner_id === user?.id;
@@ -1030,6 +1065,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     setRunHistory([]);
     setRunHistoryOpen(false);
     setActiveRunReplayId(null);
+    setCreateFileMenuOpen(false);
     runMetaRef.current = { runId: null, startedAt: 0, fileName: "", capture: null };
     setActivityFeed([]);
     setVoiceParticipants([]);
@@ -1038,6 +1074,12 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     setVoiceEnabled(false);
     setVoiceJoining(false);
     setVoiceMuted(false);
+    setBlockDocuments([]);
+    setCurrentBlockDocumentId(null);
+    setActiveEditorKind("file");
+    setShowGeneratedBlockCode(false);
+    setGeneratedBlockCode("");
+    generatedBlockCodeRef.current = "";
     setPybricksHubState({
       connected: false,
       status: "disconnected",
@@ -1070,9 +1112,11 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     socket.connect();
     const handleProjectState = (data) => {
       const incoming = data?.files || [];
+      const incomingBlockDocuments = Array.isArray(data?.blockDocuments) ? data.blockDocuments : [];
       const incomingTasks = Array.isArray(data?.tasks) ? data.tasks : [];
       const incomingVoice = Array.isArray(data?.voiceParticipants) ? data.voiceParticipants : [];
       setFiles(incoming);
+      setBlockDocuments(incomingBlockDocuments);
       setTasks(incomingTasks);
       setVoiceParticipants(
         incomingVoice
@@ -1091,6 +1135,9 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       });
       if (!currentFileIdRef.current && incoming.length) {
         setCurrentFileId(incoming[0].id);
+      }
+      if (!currentBlockDocumentId && incomingBlockDocuments.length) {
+        setCurrentBlockDocumentId(incomingBlockDocuments[0].id);
       }
     };
 
@@ -1166,13 +1213,17 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
 
     const handlePresence = (data) => {
       const normalizedUsers = (data?.users || []).map((entry) => {
+        const blockPresence =
+          entry?.block_presence && typeof entry.block_presence === "object"
+            ? entry.block_presence
+            : null;
         if (!entry?.cursor || typeof entry.cursor !== "object") {
-          return { ...entry, cursor: null };
+          return { ...entry, cursor: null, block_presence: blockPresence };
         }
         const from = Number.isInteger(entry.cursor.from) ? entry.cursor.from : 0;
         const to = Number.isInteger(entry.cursor.to) ? entry.cursor.to : from;
         const fileId = Number.isInteger(entry.cursor.fileId) ? entry.cursor.fileId : null;
-        return { ...entry, cursor: { from, to, fileId } };
+        return { ...entry, cursor: { from, to, fileId }, block_presence: blockPresence };
       });
       const previousUsers = presenceRef.current || [];
       if (activityBootstrappedRef.current) {
@@ -1718,6 +1769,12 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   }, [awaitingInput, running]);
 
   useEffect(() => {
+    if (isBlockEditorActive) {
+      editorViewRef.current = null;
+    }
+  }, [isBlockEditorActive]);
+
+  useEffect(() => {
     if (editorViewRef.current) {
       const remote = visibleRemoteCursors(presence, currentFileIdRef.current);
       applyRemoteCursors(remote);
@@ -1740,8 +1797,25 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       return;
     }
 
+    const followedBlockPresence =
+      followed?.block_presence && typeof followed.block_presence === "object"
+        ? followed.block_presence
+        : null;
+    const followedBlockDocumentId = Number.isInteger(followedBlockPresence?.documentId)
+      ? followedBlockPresence.documentId
+      : null;
+
+    if (followedBlockDocumentId) {
+      mirroredCursorRef.current = { fileId: null, from: -1, to: -1 };
+      if (!isBlockEditorActive || currentBlockDocumentId !== followedBlockDocumentId) {
+        selectBlockDocument(followedBlockDocumentId, { closeTerminal: false, preserveFollow: true });
+      }
+      return;
+    }
+
     if (typeof followed.cursor?.fileId === "number" && followed.cursor.fileId !== currentFileIdRef.current) {
       setCurrentFileId(followed.cursor.fileId);
+      setActiveEditorKind("file");
       return;
     }
 
@@ -1761,7 +1835,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       scrollIntoView: true,
       annotations: [ExternalChange.of(true)],
     });
-  }, [followTargetId, presence, currentFileId]);
+  }, [currentBlockDocumentId, currentFileId, followTargetId, isBlockEditorActive, presence]);
 
   useEffect(() => {
     if (!followFlash) return;
@@ -1795,11 +1869,32 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     }
   };
 
-  const createFile = async () => {
+  const openCreateFileMenu = () => {
+    if (!canEdit) return;
+    setSidebarOpen(true);
+    setCreateFileMenuOpen((prev) => !prev);
+  };
+
+  const createFile = async (kind) => {
     if (!canEdit) return;
     if (!projectApiId) return;
-    const name = prompt("File name (e.g. utils.py)");
+    if (kind !== "text" && kind !== "blocks") return;
+    setCreateFileMenuOpen(false);
+    const namePrompt = kind === "blocks" ? "Block file name" : "Text file name (e.g. utils.py)";
+    const name = prompt(namePrompt);
     if (!name) return;
+
+    if (kind === "blocks") {
+      const res = await api.post(`/projects/${projectApiId}/block-documents`, { name });
+      setBlockDocuments((prev) => [...prev, res.data]);
+      setActiveEditorKind("blocks");
+      setCurrentBlockDocumentId(res.data.id);
+      if (!running) {
+        setTerminalOpen(false);
+      }
+      return;
+    }
+
     const res = await api.post(`/projects/${projectApiId}/files`, { name, content: `# ${name}\n` });
     setFiles((prev) => [...prev, res.data]);
     const st = getCollabState(res.data.id);
@@ -1811,6 +1906,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       st.opId = null;
     }
     setCurrentFileId(res.data.id);
+    setActiveEditorKind("file");
   };
 
   const deleteFile = async (fileId) => {
@@ -1821,7 +1917,16 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     setFiles((prev) => {
       const filtered = prev.filter((f) => f.id !== fileId);
       if (currentFileId === fileId) {
-        setCurrentFileId(filtered[0]?.id || null);
+        if (filtered[0]?.id) {
+          setCurrentFileId(filtered[0].id);
+          setActiveEditorKind("file");
+        } else if (blockDocumentsRef.current.length) {
+          setCurrentFileId(null);
+          setCurrentBlockDocumentId(blockDocumentsRef.current[0].id);
+          setActiveEditorKind("blocks");
+        } else {
+          setCurrentFileId(null);
+        }
       }
       return filtered;
     });
@@ -1836,8 +1941,44 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     setFiles((prev) => prev.map((f) => (f.id === file.id ? res.data : f)));
   };
 
+  const renameBlockDocument = async (document) => {
+    if (!canEdit) return;
+    if (!projectApiId) return;
+    const name = prompt("New block file name", document.name);
+    if (!name || name === document.name) return;
+    const res = await api.patch(`/projects/${projectApiId}/block-documents/${document.id}`, { name });
+    setBlockDocuments((prev) => prev.map((entry) => (entry.id === document.id ? res.data : entry)));
+  };
+
+  const deleteBlockDocument = async (documentId) => {
+    if (!canEdit) return;
+    if (!projectApiId) return;
+    if (!confirm("Delete this block file?")) return;
+    await api.delete(`/projects/${projectApiId}/block-documents/${documentId}`);
+    setBlockDocuments((prev) => {
+      const filtered = prev.filter((entry) => entry.id !== documentId);
+      if (currentBlockDocumentId === documentId) {
+        const nextBlockDocumentId = filtered[0]?.id || null;
+        if (nextBlockDocumentId) {
+          setCurrentBlockDocumentId(nextBlockDocumentId);
+          setActiveEditorKind("blocks");
+        } else if (filesRef.current.length) {
+          setActiveEditorKind("file");
+          setCurrentFileId(filesRef.current[0].id);
+        } else {
+          setCurrentBlockDocumentId(null);
+          setActiveEditorKind("file");
+        }
+      }
+      return filtered;
+    });
+  };
+
   const selectFile = (fileId) => {
-    if (!fileId || fileId === currentFileIdRef.current) return;
+    if (!fileId) return;
+    if (activeEditorKind === "file" && fileId === currentFileIdRef.current) return;
+    setCreateFileMenuOpen(false);
+    setActiveEditorKind("file");
     if (followTargetId) {
       setFollowTargetId(null);
       setFollowFlash("Quantum sync paused after your manual file switch.");
@@ -1850,6 +1991,32 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     }
     mirroredCursorRef.current = { fileId: null, from: -1, to: -1 };
     setCurrentFileId(fileId);
+  };
+
+  const selectBlockDocument = (documentId, options = {}) => {
+    if (!documentId) return;
+    const { closeTerminal = true, preserveFollow = false } = options;
+    if (followTargetId && !preserveFollow) {
+      setFollowTargetId(null);
+      setFollowFlash("Quantum sync paused after your manual file switch.");
+    }
+    setCreateFileMenuOpen(false);
+    setActiveEditorKind("blocks");
+    setCurrentBlockDocumentId(documentId);
+    if (closeTerminal && !running) {
+      setTerminalOpen(false);
+    }
+  };
+
+  const handleBlockWorkspaceChange = (documentId, workspaceJson) => {
+    setBlockDocuments((prev) =>
+      prev.map((document) => (document.id === documentId ? { ...document, workspace_json: workspaceJson } : document)),
+    );
+  };
+
+  const handleGeneratedBlockCodeChange = (code) => {
+    setGeneratedBlockCode(code || "");
+    generatedBlockCodeRef.current = code || "";
   };
 
   const appendCompilerOutput = (chunk) => {
@@ -1874,7 +2041,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   };
 
   const runCode = async () => {
-    if (!currentFile) return;
+    if (!currentFile && !isBlockEditorActive) return;
     if (isPybricksProject && !canEdit) return;
     const runner = runnerRef.current;
     if (!runner || !runtimeReady) {
@@ -1886,12 +2053,26 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       return;
     }
     try {
-      await flushEdits(currentFile.id);
-      const editorSnapshot = editorViewRef.current?.state.doc.toString();
-      const runtimeFiles =
-        typeof editorSnapshot === "string"
-          ? files.map((f) => (f.id === currentFile.id ? { ...f, content: editorSnapshot } : f))
-          : files;
+      let runtimeFiles = files;
+      let entryFileId = currentFile?.id;
+      let entryFileName = currentFile?.name;
+      let entryFileContent;
+      let runFileName = currentFile?.name || "unknown.py";
+
+      if (isBlockEditorActive && currentBlockDocument) {
+        entryFileId = currentBlockDocument.id * -1;
+        entryFileName = currentBlockDocument.generated_entry_module || "main.py";
+        entryFileContent = generatedBlockCodeRef.current || generatedBlockCode || "";
+        runtimeFiles = files.filter((file) => file.name !== entryFileName);
+        runFileName = `${currentBlockDocument.name} / ${entryFileName}`;
+      } else {
+        await flushEdits(currentFile.id);
+        const editorSnapshot = editorViewRef.current?.state.doc.toString();
+        runtimeFiles =
+          typeof editorSnapshot === "string"
+            ? files.map((f) => (f.id === currentFile.id ? { ...f, content: editorSnapshot } : f))
+            : files;
+      }
 
       setOutput("");
       outputRef.current = "";
@@ -1903,11 +2084,13 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       runMetaRef.current = {
         runId: null,
         startedAt,
-        fileName: currentFile.name || "unknown.py",
+        fileName: runFileName,
         capture: "",
       };
       await runner.run({
-        entryFileId: currentFile.id,
+        entryFileId,
+        entryFileName,
+        entryFileContent,
         files: runtimeFiles,
       });
       runMetaRef.current = {
@@ -2243,7 +2426,6 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
 
   const extensions = useMemo(() => [python(), EditorView.lineWrapping, remoteCursorField], []);
 
-  const filteredFiles = files.filter(f => f.name.toLowerCase().includes(fileSearch.toLowerCase()));
   const sortedTasks = useMemo(
     () =>
       [...tasks].sort((a, b) => {
@@ -2274,6 +2456,31 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     });
     return mapping;
   }, [files]);
+  const blockDocumentNameById = useMemo(() => {
+    const mapping = new Map();
+    blockDocuments.forEach((document) => {
+      mapping.set(document.id, document.name);
+    });
+    return mapping;
+  }, [blockDocuments]);
+  const filteredEditorEntries = useMemo(() => {
+    const query = fileSearch.trim().toLowerCase();
+    return [
+      ...blockDocuments.map((document) => ({
+        kind: "blocks",
+        id: document.id,
+        key: `blocks-${document.id}`,
+        name: document.name,
+        generatedEntryModule: document.generated_entry_module || "main.py",
+      })),
+      ...files.map((file) => ({
+        kind: "file",
+        id: file.id,
+        key: `file-${file.id}`,
+        name: file.name,
+      })),
+    ].filter((entry) => !query || entry.name.toLowerCase().includes(query));
+  }, [blockDocuments, fileSearch, files]);
   const followTarget = useMemo(
     () => (presence || []).find((person) => person.user_id === followTargetId) || null,
     [presence, followTargetId]
@@ -2285,6 +2492,10 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const latestRunSummary = latestRun
     ? `${latestRun.statusLabel} • ${formatRunDuration(latestRun.durationMs)} • exit ${latestRun.returnCode}`
     : "";
+  const isTextFileActive = (fileId) => activeEditorKind === "file" && currentFileId === fileId;
+  const isBlockFileActive = (documentId) => isBlockEditorActive && currentBlockDocumentId === documentId;
+  const isEditorEntryActive = (entry) =>
+    entry.kind === "blocks" ? isBlockFileActive(entry.id) : isTextFileActive(entry.id);
   const stdinPlaceholder =
     !running
       ? "Run code first"
@@ -2364,10 +2575,10 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
             {
               key: "cmd-new-file",
               title: "Create new file",
-              subtitle: "Add a new file to this project",
+              subtitle: "Choose text or block, then name it",
               badge: "Edit",
               icon: <FiFilePlus size={14} />,
-              onSelect: () => createFile(),
+              onSelect: () => openCreateFileMenu(),
             },
             {
               key: "cmd-checkpoint",
@@ -2383,16 +2594,24 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       .filter((item) => matches(`${item.title} ${item.subtitle} ${item.badge || ""}`))
       .slice(0, 10);
 
-    const fileItems = files
-      .filter((file) => matches(file.name))
+    const fileItems = filteredEditorEntries
+      .filter((entry) => matches(entry.name))
       .slice(0, 14)
-      .map((file) => ({
-        key: `file-${file.id}`,
-        title: `Open file: ${file.name}`,
-        subtitle: file.id === currentFileId ? "Currently open" : "Switch editor focus",
-        badge: "File",
-        icon: <FiFile size={14} />,
-        onSelect: () => selectFile(file.id),
+      .map((entry) => ({
+        key: entry.key,
+        title: `Open ${entry.kind === "blocks" ? "block file" : "file"}: ${entry.name}`,
+        subtitle:
+          entry.kind === "blocks"
+            ? isBlockFileActive(entry.id)
+              ? "Currently open"
+              : "Switch block workspace"
+            : isTextFileActive(entry.id)
+              ? "Currently open"
+              : "Switch editor focus",
+        badge: entry.kind === "blocks" ? "Blocks" : "File",
+        icon: entry.kind === "blocks" ? <FiZap size={14} /> : <FiFile size={14} />,
+        onSelect: () =>
+          entry.kind === "blocks" ? selectBlockDocument(entry.id) : selectFile(entry.id),
       }));
 
     const taskItems = canEdit
@@ -2434,6 +2653,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     canEdit,
     files,
     currentFileId,
+    activeEditorKind,
     sortedTasks,
     sortedSnapshots,
     runCode,
@@ -2441,10 +2661,15 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     clearTerminal,
     navigate,
     createFile,
+    openCreateFileMenu,
     createSnapshot,
+    currentBlockDocumentId,
     selectFile,
+    selectBlockDocument,
     toggleTask,
     restoreSnapshot,
+    filteredEditorEntries,
+    isBlockEditorActive,
   ]);
 
   const formatActivityTime = (ts) =>
@@ -2536,9 +2761,23 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
               <div className="es-section-header">
                 <span className="es-section-label">Files</span>
                 {canEdit && (
-                  <button className="es-icon-btn" onClick={createFile} title="New File">
-                    <FiPlus size={14} />
-                  </button>
+                  <div className="es-create-file-menu-wrap" ref={createFileMenuRef}>
+                    <button className={`es-icon-btn${createFileMenuOpen ? " active" : ""}`} onClick={openCreateFileMenu} title="New File">
+                      <FiPlus size={14} />
+                    </button>
+                    {createFileMenuOpen && (
+                      <div className="es-create-file-menu" role="menu" aria-label="Create file">
+                        <button className="es-create-file-option" onClick={() => createFile("text")}>
+                          <FiFile size={13} />
+                          <span>Text File</span>
+                        </button>
+                        <button className="es-create-file-option" onClick={() => createFile("blocks")}>
+                          <FiZap size={13} />
+                          <span>Block File</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
                 )}
               </div>
               <div className="es-search-wrap">
@@ -2552,9 +2791,11 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
               </div>
               <div className="es-file-list">
                 <AnimatePresence initial={false}>
-                  {filteredFiles.map((f) => (
-                    <div key={f.id} style={{ position: "relative" }}>
-                      {currentFileId === f.id && (
+                  {filteredEditorEntries.map((entry) => {
+                    const isActive = isEditorEntryActive(entry);
+                    return (
+                    <div key={entry.key} style={{ position: "relative" }}>
+                      {isActive && (
                         <motion.div
                           layoutId="activeFileBg"
                           className="es-file-active-bg"
@@ -2565,26 +2806,58 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                       )}
                       <motion.div
                         layout
-                        className={`es-file-item ${currentFileId === f.id ? "active" : ""}`}
-                        onClick={() => selectFile(f.id)}
+                        className={`es-file-item ${isActive ? "active" : ""}`}
+                        onClick={() =>
+                          entry.kind === "blocks" ? selectBlockDocument(entry.id) : selectFile(entry.id)
+                        }
                         whileHover={{ x: 2 }}
                       >
                         <span className="es-file-name">
-                          <FiFile size={13} className={f.name.endsWith(".py") ? "es-file-icon-py" : "es-file-icon"} />
-                          {f.name}
+                          {entry.kind === "blocks" ? (
+                            <FiZap size={13} className="es-file-icon-py" />
+                          ) : (
+                            <FiFile size={13} className={entry.name.endsWith(".py") ? "es-file-icon-py" : "es-file-icon"} />
+                          )}
+                          {entry.name}
                         </span>
                         <div className="es-file-actions">
                           {canEdit && (
                             <>
-                              <button className="es-file-action" onClick={(e) => { e.stopPropagation(); renameFile(f); }}><FiEdit2 size={11} /></button>
-                              <button className="es-file-action danger" onClick={(e) => { e.stopPropagation(); deleteFile(f.id); }}><FiTrash2 size={11} /></button>
+                              <button
+                                className="es-file-action"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (entry.kind === "blocks") {
+                                    const document = blockDocuments.find((item) => item.id === entry.id);
+                                    if (document) renameBlockDocument(document);
+                                    return;
+                                  }
+                                  const file = files.find((item) => item.id === entry.id);
+                                  if (file) renameFile(file);
+                                }}
+                              >
+                                <FiEdit2 size={11} />
+                              </button>
+                              <button
+                                className="es-file-action danger"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  if (entry.kind === "blocks") {
+                                    deleteBlockDocument(entry.id);
+                                    return;
+                                  }
+                                  deleteFile(entry.id);
+                                }}
+                              >
+                                <FiTrash2 size={11} />
+                              </button>
                             </>
                           )}
                         </div>
                       </motion.div>
                     </div>
-                  ))}
-                  {filteredFiles.length === 0 && <div className="es-empty">No matching files.</div>}
+                  )})}
+                  {filteredEditorEntries.length === 0 && <div className="es-empty">No matching files.</div>}
                 </AnimatePresence>
               </div>
             </div>
@@ -2788,7 +3061,9 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                             {p.name} {p.is_admin && <VerifiedBadge size={11} />} {p.user_id === user.id && <span className="muted">(You)</span>}
                           </span>
                           <span className="es-team-location">
-                            {typeof p.cursor?.fileId === "number"
+                            {Number.isInteger(p.block_presence?.documentId)
+                              ? `In ${blockDocumentNameById.get(p.block_presence.documentId) || "a block file"}`
+                              : typeof p.cursor?.fileId === "number"
                               ? `In ${fileNameById.get(p.cursor.fileId) || "an untitled file"}`
                               : "Idle"}
                           </span>
@@ -2951,19 +3226,21 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                     />
                   </div>
                   <div className="viewer-file-tabs" role="tablist" aria-label="Project files">
-                    {filteredFiles.map((file) => (
+                    {filteredEditorEntries.map((entry) => (
                       <button
-                        key={file.id}
-                        className={`viewer-file-tab ${currentFileId === file.id ? "active" : ""}`}
-                        onClick={() => selectFile(file.id)}
+                        key={`viewer-${entry.key}`}
+                        className={`viewer-file-tab ${isEditorEntryActive(entry) ? "active" : ""}`}
+                        onClick={() =>
+                          entry.kind === "blocks" ? selectBlockDocument(entry.id) : selectFile(entry.id)
+                        }
                         role="tab"
-                        aria-selected={currentFileId === file.id}
+                        aria-selected={isEditorEntryActive(entry)}
                       >
-                        <FiFile size={12} />
-                        <span>{file.name}</span>
+                        {entry.kind === "blocks" ? <FiZap size={12} /> : <FiFile size={12} />}
+                        <span>{entry.name}</span>
                       </button>
                     ))}
-                    {filteredFiles.length === 0 && <span className="viewer-file-empty">No matching files.</span>}
+                    {filteredEditorEntries.length === 0 && <span className="viewer-file-empty">No matching files.</span>}
                   </div>
                 </div>
               </div>
@@ -2971,16 +3248,26 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
               <>
                 <div className="editor-file">
                   <div className="editor-file-icon">
-                    {currentFile?.name?.endsWith(".py") ? <FiFile size={18} className="file-icon" /> : <FiFile size={18} className="muted" />}
+                    {isBlockEditorActive ? (
+                      <FiZap size={18} className="file-icon" />
+                    ) : currentFile?.name?.endsWith(".py") ? (
+                      <FiFile size={18} className="file-icon" />
+                    ) : (
+                      <FiFile size={18} className="muted" />
+                    )}
                   </div>
                   <div className="editor-file-meta">
                     <div className="editor-file-name">
-                      {currentFile?.name || "No file selected"}
+                      {isBlockEditorActive ? currentBlockDocument?.name || "Blocks" : currentFile?.name || "No file selected"}
                       <span className={`editor-file-badge ${isViewerMode ? "viewer" : "editor"}`}>
                         {isViewerMode ? "Viewer" : "Editable"}
                       </span>
                     </div>
-                    <div className="editor-file-path muted">/root/{currentFile?.name}</div>
+                    <div className="editor-file-path muted">
+                      {isBlockEditorActive
+                        ? `/workspace/${currentBlockDocument?.generated_entry_module || "main.py"}`
+                        : `/root/${currentFile?.name}`}
+                    </div>
                   </div>
                 </div>
                 <div className="editor-status">
@@ -3050,6 +3337,15 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                 >
                   <FiSearch size={16} />
                 </button>
+                {isBlockEditorActive && (
+                  <button
+                    className={`icon-btn${showGeneratedBlockCode ? " active" : ""}`}
+                    onClick={() => setShowGeneratedBlockCode((prev) => !prev)}
+                    title={showGeneratedBlockCode ? "Hide generated Python" : "View generated Python"}
+                  >
+                    <FiCode size={16} />
+                  </button>
+                )}
                 {isPybricksProject && (
                   <button
                     className={`btn ${pybricksHubState.connected ? "btn-ghost pybricks-connect-btn-connected" : "btn-primary pybricks-connect-btn"}`}
@@ -3094,7 +3390,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
                   className="btn btn-primary editor-run-btn"
-                  disabled={!currentFile || running || !runtimeReady || (isPybricksProject && (!canEdit || !pybricksHubState.connected))}
+                  disabled={(!currentFile && !isBlockEditorActive) || running || !runtimeReady || (isPybricksProject && (!canEdit || !pybricksHubState.connected))}
                   onClick={runCode}
                 >
                   {running ? <div className="spinner" style={{ width: 16, height: 16, border: "2px solid currentColor", borderTopColor: "transparent" }} /> : <FiPlay fill="currentColor" />}
@@ -3230,16 +3526,36 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                   </span>
                 </div>
               )}
-              <CodeMirror
-                height="100%"
-                value={currentFile?.content || ""}
-                extensions={extensions}
-                theme={editorTheme}
-                readOnly={!canEdit}
-                onCreateEditor={(view) => (editorViewRef.current = view)}
-                onUpdate={onUpdate}
-                basicSetup={{ lineNumbers: true, foldGutter: true, highlightActiveLine: true, autocompletion: true }}
-              />
+              {isBlockEditorActive ? (
+                <PybricksBlocksEditor
+                  blockDocument={currentBlockDocument}
+                  socket={socket}
+                  socketProjectId={socketProjectId}
+                  canEdit={canEdit}
+                  presence={presence}
+                  currentUserId={user?.id}
+                  followPresence={
+                    followTarget?.block_presence?.documentId === currentBlockDocument?.id
+                      ? followTarget.block_presence
+                      : null
+                  }
+                  onWorkspaceJsonChange={handleBlockWorkspaceChange}
+                  onGeneratedCodeChange={handleGeneratedBlockCodeChange}
+                  onToggleGeneratedCodeRequest={() => setShowGeneratedBlockCode((prev) => !prev)}
+                  showGeneratedCode={showGeneratedBlockCode}
+                />
+              ) : (
+                <CodeMirror
+                  height="100%"
+                  value={currentFile?.content || ""}
+                  extensions={extensions}
+                  theme={editorTheme}
+                  readOnly={!canEdit}
+                  onCreateEditor={(view) => (editorViewRef.current = view)}
+                  onUpdate={onUpdate}
+                  basicSetup={{ lineNumbers: true, foldGutter: true, highlightActiveLine: true, autocompletion: true }}
+                />
+              )}
             </div>
           </div>
 

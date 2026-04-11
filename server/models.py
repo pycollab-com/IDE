@@ -86,6 +86,13 @@ class Project(Base):
     public_id = Column(String, unique=True, nullable=False, index=True, default=generate_project_public_id)
     name = Column(String, nullable=False, index=True)
     project_type = Column(String, nullable=False, default="normal", server_default=text("'normal'"), index=True)
+    editor_mode = Column(String, nullable=False, default="text", server_default=text("'text'"))
+    entry_block_document_id = Column(
+        Integer,
+        ForeignKey("project_block_documents.id", use_alter=True, name="fk_projects_entry_block_document_id"),
+        nullable=True,
+        index=True,
+    )
     owner_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     created_at = Column(DateTime, default=dt.datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow, nullable=False)
@@ -96,6 +103,17 @@ class Project(Base):
 
     owner = relationship("User", back_populates="projects")
     files = relationship("ProjectFile", back_populates="project", cascade="all, delete-orphan")
+    block_documents = relationship(
+        "ProjectBlockDocument",
+        back_populates="project",
+        cascade="all, delete-orphan",
+        foreign_keys="ProjectBlockDocument.project_id",
+    )
+    entry_block_document = relationship(
+        "ProjectBlockDocument",
+        foreign_keys=[entry_block_document_id],
+        post_update=True,
+    )
     collaborators = relationship("ProjectCollaborator", back_populates="project", cascade="all, delete-orphan")
     share_tokens = relationship("ProjectShareToken", back_populates="project", cascade="all, delete-orphan")
     tasks = relationship("ProjectTask", back_populates="project", cascade="all, delete-orphan")
@@ -120,6 +138,25 @@ class ProjectFile(Base):
     project = relationship("Project", back_populates="files")
 
     __table_args__ = (UniqueConstraint("project_id", "name", name="uq_project_file_name"),)
+
+
+class ProjectBlockDocument(Base):
+    __tablename__ = "project_block_documents"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    name = Column(String, nullable=False, default="Blocks")
+    workspace_json = Column(Text, default="{}", nullable=False)
+    workspace_version = Column(Integer, default=1, nullable=False)
+    generated_entry_module = Column(String, default="main.py", nullable=False)
+    created_at = Column(DateTime, default=dt.datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow, nullable=False)
+
+    project = relationship("Project", back_populates="block_documents", foreign_keys=[project_id])
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "name", name="uq_project_block_document_name"),
+    )
 
 
 class ProjectCollaborator(Base):

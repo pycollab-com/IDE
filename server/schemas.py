@@ -119,6 +119,16 @@ class ProjectFileOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+class ProjectBlockDocumentOut(BaseModel):
+    id: int
+    name: str
+    workspace_json: str
+    workspace_version: int = 1
+    generated_entry_module: str = "main.py"
+
+    model_config = ConfigDict(from_attributes=True)
+
+
 class ProjectCollaboratorOut(BaseModel):
     user_id: int
     role: str
@@ -143,10 +153,13 @@ class ProjectOut(BaseModel):
     name: str
     project_type: ProjectType = "normal"
     description: Optional[str] = None
+    editor_mode: str = "text"
+    entry_block_document_id: Optional[int] = None
     owner_id: int
     owner_name: Optional[str] = None  # Will be populated by the API
     is_public: bool = False
     files: List[ProjectFileOut] = []
+    block_documents: List[ProjectBlockDocumentOut] = []
     collaborators: List[ProjectCollaboratorOut] = []
 
     model_config = ConfigDict(from_attributes=True)
@@ -204,6 +217,20 @@ class FileCreate(BaseModel):
 class FileUpdate(BaseModel):
     name: Optional[str] = None
     content: Optional[str] = None
+
+
+class ProjectBlockDocumentCreate(BaseModel):
+    name: str
+    workspace_json: Optional[str] = None
+    workspace_version: Optional[int] = None
+    generated_entry_module: Optional[str] = None
+
+
+class ProjectBlockDocumentUpdate(BaseModel):
+    name: Optional[str] = None
+    workspace_json: Optional[str] = None
+    workspace_version: Optional[int] = None
+    generated_entry_module: Optional[str] = None
 
 
 class RunRequest(BaseModel):
