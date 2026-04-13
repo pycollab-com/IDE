@@ -143,6 +143,63 @@ def test_block_document_crud_routes():
     _clear_block_state()
 
 
+def test_normal_projects_hide_and_reject_block_documents():
+    _clear_block_state()
+    client = TestClient(app)
+    headers, _ = _register_user(client)
+
+    response = client.post(
+        "/projects",
+        json={"name": "Plain Python", "project_type": "normal"},
+        headers=headers,
+    )
+    assert response.status_code == 200
+    project = response.json()
+    assert project["block_documents"] == []
+
+    db = SessionLocal()
+    try:
+        db.add(
+            models.ProjectBlockDocument(
+                project_id=project["id"],
+                name="Leaked Blocks",
+                workspace_json="{}",
+                workspace_version=1,
+                generated_entry_module="leaked_blocks.py",
+            )
+        )
+        db.commit()
+    finally:
+        db.close()
+
+    refreshed = client.get(f"/projects/{project['id']}", headers=headers)
+    assert refreshed.status_code == 200
+    assert refreshed.json()["block_documents"] == []
+
+    created = client.post(
+        f"/projects/{project['id']}/block-documents",
+        json={"name": "Should Fail"},
+        headers=headers,
+    )
+    assert created.status_code == 400
+    assert created.json()["detail"] == "Block files are only supported for Pybricks projects"
+
+    client.close()
+    _clear_block_state()
+
+
+def test_pybricks_host_page_is_served_directly():
+    client = TestClient(app)
+
+    response = client.get("/pybricks-blocks-host.html")
+
+    assert response.status_code == 200
+    assert "Pybricks Blocks Host" in response.text
+    assert "<script type=\"module\" src=\"/pybricks-blocks-host.js\"></script>" in response.text
+
+    client.close()
+
+
 def test_blocks_op_and_snapshot_roundtrip():
     _clear_block_state()
     client = TestClient(app)

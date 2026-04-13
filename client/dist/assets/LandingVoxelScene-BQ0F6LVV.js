@@ -1,4 +1,4 @@
-import{r as xa,j as Er}from"./index-BVkmgJyK.js";/**
+import{r as xa,j as Er}from"./index-BG6KDqQN.js";/**
  * @license
  * Copyright 2010-2025 Three.js Authors
  * SPDX-License-Identifier: MIT

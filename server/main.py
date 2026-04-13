@@ -398,6 +398,10 @@ def _ensure_block_state(db: Session, project_id: int, document_id: int) -> Optio
     if state and state.project_id == project_id:
         return state
 
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not project or not _project_supports_blocks(project):
+        return None
+
     doc = (
         db.query(models.ProjectBlockDocument)
         .filter(
@@ -760,6 +764,11 @@ def _default_project_editor_mode(project_type: str) -> str:
     return EDITOR_MODE_TEXT
 
 
+def _project_supports_blocks(project_or_type: Any) -> bool:
+    project_type = getattr(project_or_type, "project_type", project_or_type)
+    return (project_type or PROJECT_TYPE_NORMAL) == PROJECT_TYPE_PYBRICKS
+
+
 def _project_block_document_payload(document: models.ProjectBlockDocument, *, rev: Optional[int] = None) -> Dict[str, Any]:
     payload = {
         "id": document.id,
@@ -799,6 +808,31 @@ def _create_default_block_document(db: Session, project: models.Project) -> mode
 
 def _generate_project_public_id() -> str:
     return models.generate_project_public_id()
+
+
+def _project_payload(db: Session, project: models.Project) -> Dict[str, Any]:
+    owner = db.query(models.User).filter(models.User.id == project.owner_id).first()
+    return {
+        "id": project.id,
+        "public_id": project.public_id or "",
+        "name": project.name,
+        "project_type": project.project_type or PROJECT_TYPE_NORMAL,
+        "description": project.description,
+        "editor_mode": project.editor_mode or _default_project_editor_mode(project.project_type or PROJECT_TYPE_NORMAL),
+        "entry_block_document_id": project.entry_block_document_id,
+        "owner_id": project.owner_id,
+        "owner_name": owner.display_name if owner else "Unknown",
+        "is_public": project.is_public,
+        "files": project.files,
+        "block_documents": project.block_documents if _project_supports_blocks(project) else [],
+        "collaborators": project.collaborators,
+    }
+
+
+def _ensure_pybricks_project(project: models.Project) -> None:
+    if _project_supports_blocks(project):
+        return
+    raise HTTPException(status_code=400, detail="Block files are only supported for Pybricks projects")
 
 
 def _cross_origin_isolation_enabled() -> bool:
@@ -1616,7 +1650,7 @@ def admin_delete_user(user_id: int, current_user: models.User = Depends(check_ad
 @app.get("/admin/api/projects", response_model=List[schemas.ProjectOut])
 @app.get("/admin/projects", response_model=List[schemas.ProjectOut])
 def admin_list_projects(current_user: models.User = Depends(check_admin), db: Session = Depends(get_db)):
-    return db.query(models.Project).all()
+    return _enrich_projects_with_owner(db, db.query(models.Project).all())
 
 @app.get("/admin/api/projects/{project_id}", response_model=schemas.ProjectOut)
 @app.get("/admin/projects/{project_id}", response_model=schemas.ProjectOut)
@@ -1624,7 +1658,7 @@ def admin_get_project(project_id: int, current_user: models.User = Depends(check
     project = db.query(models.Project).filter(models.Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    return project
+    return _project_payload(db, project)
 
 @app.delete("/admin/api/projects/{project_id}")
 @app.delete("/admin/projects/{project_id}")
@@ -2023,7 +2057,7 @@ def list_projects(current_user: models.User = Depends(get_current_user), db: Ses
     ]
     shared = db.query(models.Project).filter(models.Project.id.in_(collab_ids))
     projects = owned.union(shared).all()
-    return projects
+    return _enrich_projects_with_owner(db, projects)
 
 
 @app.post("/projects", response_model=schemas.ProjectOut)
@@ -2049,34 +2083,14 @@ def create_project(project_in: schemas.ProjectCreate, current_user: models.User 
     db.add(default_file)
     db.commit()
     db.refresh(project)
-    return project
+    return _project_payload(db, project)
 
 
 # --- IMPORTANT: These routes MUST be defined BEFORE /projects/{project_id} ---
 
 # Helper to add owner_name to project
 def _enrich_projects_with_owner(db: Session, projects):
-    """Add owner_name to each project"""
-    result = []
-    for p in projects:
-        owner = db.query(models.User).filter(models.User.id == p.owner_id).first()
-        p_dict = {
-            "id": p.id,
-            "public_id": p.public_id or "",
-            "name": p.name,
-            "project_type": p.project_type or PROJECT_TYPE_NORMAL,
-            "description": p.description,
-            "editor_mode": p.editor_mode or _default_project_editor_mode(p.project_type or PROJECT_TYPE_NORMAL),
-            "entry_block_document_id": p.entry_block_document_id,
-            "owner_id": p.owner_id,
-            "owner_name": owner.display_name if owner else "Unknown",
-            "is_public": p.is_public,
-            "files": p.files,
-            "block_documents": p.block_documents,
-            "collaborators": p.collaborators
-        }
-        result.append(p_dict)
-    return result
+    return [_project_payload(db, project) for project in projects]
 
 @app.get("/projects/explore/all")
 def explore_projects(db: Session = Depends(get_db)):
@@ -2111,7 +2125,7 @@ def search_projects(q: str = "", db: Session = Depends(get_db)):
 @app.get("/projects/{project_ref}", response_model=schemas.ProjectOut)
 def get_project(project_ref: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     project = _ensure_project_access(db, project_ref, current_user)
-    return project
+    return _project_payload(db, project)
 
 
 @app.patch("/projects/{project_id}", response_model=schemas.ProjectOut)
@@ -2122,7 +2136,7 @@ def update_project(project_id: int, project_in: schemas.ProjectCreate, current_u
         project.description = project_in.description
     db.commit()
     db.refresh(project)
-    return project
+    return _project_payload(db, project)
 
 
 @app.post("/projects/{project_id}/duplicate", response_model=schemas.ProjectOut)
@@ -2187,7 +2201,7 @@ def duplicate_project(
 
     db.commit()
     db.refresh(duplicated_project)
-    return duplicated_project
+    return _project_payload(db, duplicated_project)
 
 
 @app.delete("/projects/{project_id}")
@@ -2216,6 +2230,7 @@ def add_block_document(
     db: Session = Depends(get_db),
 ):
     project = _ensure_project_access(db, project_id, current_user, require_write=True)
+    _ensure_pybricks_project(project)
     document = models.ProjectBlockDocument(
         project_id=project_id,
         name=document_in.name,
@@ -2266,7 +2281,8 @@ def update_block_document(
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    _ensure_project_access(db, project_id, current_user, require_write=True)
+    project = _ensure_project_access(db, project_id, current_user, require_write=True)
+    _ensure_pybricks_project(project)
     document = (
         db.query(models.ProjectBlockDocument)
         .filter(
@@ -2300,6 +2316,7 @@ def delete_block_document(
     db: Session = Depends(get_db),
 ):
     project = _ensure_project_access(db, project_id, current_user, require_write=True)
+    _ensure_pybricks_project(project)
     document = (
         db.query(models.ProjectBlockDocument)
         .filter(
@@ -2783,19 +2800,21 @@ async def restore_project_snapshot(
             }
         )
     payload_block_documents = []
-    block_documents = (
-        db.query(models.ProjectBlockDocument)
-        .filter(models.ProjectBlockDocument.project_id == project_id)
-        .order_by(models.ProjectBlockDocument.created_at.asc(), models.ProjectBlockDocument.id.asc())
-        .all()
-    )
-    for block_document in block_documents:
-        state = _block_states.get(block_document.id)
-        if not state or state.project_id != project_id:
-            state = _BlockSyncState(project_id=project_id, workspace_json=block_document.workspace_json or "{}")
-            _block_states[block_document.id] = state
-            _block_locks.setdefault(block_document.id, asyncio.Lock())
-        payload_block_documents.append(_project_block_document_payload(block_document, rev=state.rev))
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if project and _project_supports_blocks(project):
+        block_documents = (
+            db.query(models.ProjectBlockDocument)
+            .filter(models.ProjectBlockDocument.project_id == project_id)
+            .order_by(models.ProjectBlockDocument.created_at.asc(), models.ProjectBlockDocument.id.asc())
+            .all()
+        )
+        for block_document in block_documents:
+            state = _block_states.get(block_document.id)
+            if not state or state.project_id != project_id:
+                state = _BlockSyncState(project_id=project_id, workspace_json=block_document.workspace_json or "{}")
+                _block_states[block_document.id] = state
+                _block_locks.setdefault(block_document.id, asyncio.Lock())
+            payload_block_documents.append(_project_block_document_payload(block_document, rev=state.rev))
     payload_tasks = [_project_task_payload(task) for task in tasks]
     await sio.emit(
         "project_state",
@@ -2902,7 +2921,8 @@ def access_via_token(token: str, current_user: models.User = Depends(get_current
         collab = models.ProjectCollaborator(project_id=project.id, user_id=current_user.id)
         db.add(collab)
         db.commit()
-    return project
+        db.refresh(project)
+    return _project_payload(db, project)
 
 
 @app.post("/projects/{project_id}/run")
@@ -3167,6 +3187,7 @@ async def connect(sid, environ, auth=None):
     # send initial project state
     db2 = SessionLocal()
     try:
+        project = db2.query(models.Project).filter(models.Project.id == pid).first()
         files = (
             db2.query(models.ProjectFile)
             .filter(models.ProjectFile.project_id == pid)
@@ -3194,13 +3215,14 @@ async def connect(sid, environ, auth=None):
                 _file_locks.setdefault(f.id, asyncio.Lock())
             payload_files.append({"id": f.id, "name": f.name, "content": state.content, "rev": state.rev})
         payload_block_documents = []
-        for block_document in block_documents:
-            state = _block_states.get(block_document.id)
-            if not state or state.project_id != pid:
-                state = _BlockSyncState(project_id=pid, workspace_json=block_document.workspace_json or "{}")
-                _block_states[block_document.id] = state
-                _block_locks.setdefault(block_document.id, asyncio.Lock())
-            payload_block_documents.append(_project_block_document_payload(block_document, rev=state.rev))
+        if project and _project_supports_blocks(project):
+            for block_document in block_documents:
+                state = _block_states.get(block_document.id)
+                if not state or state.project_id != pid:
+                    state = _BlockSyncState(project_id=pid, workspace_json=block_document.workspace_json or "{}")
+                    _block_states[block_document.id] = state
+                    _block_locks.setdefault(block_document.id, asyncio.Lock())
+                payload_block_documents.append(_project_block_document_payload(block_document, rev=state.rev))
         payload_tasks = [_project_task_payload(task) for task in tasks]
         payload_voice = _voice_participants_payload(pid)
     finally:
@@ -4404,7 +4426,7 @@ def get_user_public_projects(user_id: int, db: Session = Depends(get_db)):
         .order_by(models.Project.updated_at.desc())
         .all()
     )
-    return projects
+    return _enrich_projects_with_owner(db, projects)
 
 @app.get("/users/{user_id}/followers", response_model=List[schemas.UserOut])
 def get_user_followers(
@@ -5071,7 +5093,7 @@ def toggle_project_visibility(project_id: int, current_user: models.User = Depen
     project.is_public = not project.is_public
     db.commit()
     db.refresh(project)
-    return project
+    return _project_payload(db, project)
 
 # Moved to before /projects/{project_id}
 
@@ -5128,7 +5150,7 @@ def admin_create_project_for_user(user_id: int, project_in: schemas.ProjectCreat
     db.add(default_file)
     db.commit()
     db.refresh(project)
-    return project
+    return _project_payload(db, project)
 
 # --- Socket Logic Updates ---
 # see bottom for cursor/presence
@@ -5139,6 +5161,9 @@ if os.path.exists(INDEX_FILE):
     from fastapi.staticfiles import StaticFiles
 
     app.mount("/assets", StaticFiles(directory=os.path.join(FRONTEND_DIST, "assets")), name="assets")
+    vendor_dir = os.path.join(FRONTEND_DIST, "vendor")
+    if os.path.isdir(vendor_dir):
+        app.mount("/vendor", StaticFiles(directory=vendor_dir), name="vendor")
 
     docs_dir = os.path.join(FRONTEND_DIST, "docs")
     if os.path.isdir(docs_dir):
@@ -5154,6 +5179,8 @@ if os.path.exists(INDEX_FILE):
     app.mount("/uploads", StaticFiles(directory=upload_dir), name="uploads")
 
     support_index = os.path.join(FRONTEND_DIST, "support", "index.html")
+    pybricks_blocks_host_html = os.path.join(FRONTEND_DIST, "pybricks-blocks-host.html")
+    pybricks_blocks_host_js = os.path.join(FRONTEND_DIST, "pybricks-blocks-host.js")
 
     @app.get("/support")
     @app.get("/support/")
@@ -5161,6 +5188,26 @@ if os.path.exists(INDEX_FILE):
         if os.path.exists(support_index):
             return _frontend_html_response(support_index, request_path="/support")
         return _frontend_html_response(INDEX_FILE, request_path="/support")
+
+    @app.get("/pybricks-blocks-host.html")
+    async def pybricks_blocks_host_page():
+        if not os.path.exists(pybricks_blocks_host_html):
+            raise HTTPException(status_code=404, detail="Not found")
+        return _frontend_html_response(
+            pybricks_blocks_host_html,
+            request_path="/pybricks-blocks-host.html",
+        )
+
+    @app.get("/pybricks-blocks-host.js")
+    async def pybricks_blocks_host_script():
+        if not os.path.exists(pybricks_blocks_host_js):
+            raise HTTPException(status_code=404, detail="Not found")
+        response = FileResponse(pybricks_blocks_host_js)
+        response.headers["Cache-Control"] = "no-store"
+        return _apply_cross_origin_isolation_headers(
+            response,
+            request_path="/pybricks-blocks-host.js",
+        )
 
     @app.get("/{full_path:path}")
     async def spa_fallback(full_path: str):

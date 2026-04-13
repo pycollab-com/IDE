@@ -53,7 +53,7 @@ const UPSTREAM_STARTER_JSON = JSON.stringify({
                   type: "text",
                   id: "pycollab-upstream-print-text",
                   fields: {
-                    TEXT: "Hello, Pybricks!",
+                    TEXT: "Hello, world!",
                   },
                 },
               },
@@ -114,7 +114,7 @@ function createSvgNode(tagName, attributes = {}) {
 }
 
 function getTranslateY(node) {
-  const transform = node.getAttribute("transform") || "";
+  const transform = node.dataset.pycollabOriginalTransform || node.getAttribute("transform") || "";
   const match = /translate\(\s*[-\d.]+\s*,\s*([-\d.]+)\s*\)/.exec(transform);
   return match ? Number.parseFloat(match[1]) : Number.MAX_SAFE_INTEGER;
 }
@@ -123,12 +123,44 @@ function hideUnneededChromeIcons() {
   const railIcons = Array.from(document.querySelectorAll("image.controlsIconStyleLightTheme")).sort((left, right) => {
     return getTranslateY(left) - getTranslateY(right);
   });
+  const originalSlotYs = railIcons.map((image) => {
+    if (!image.dataset.pycollabOriginalTransform) {
+      image.dataset.pycollabOriginalTransform = image.getAttribute("transform") || "";
+    }
+    return getTranslateY(image);
+  });
+  const firstVisibleIndex = railIcons.findIndex((image, index) => !HIDDEN_RAIL_ICON_INDICES.has(index));
+  const packedSlotYs =
+    firstVisibleIndex >= 0
+      ? originalSlotYs.slice(firstVisibleIndex, firstVisibleIndex + railIcons.length - HIDDEN_RAIL_ICON_INDICES.size)
+      : [];
+  let visibleIndex = 0;
 
   railIcons.forEach((image, index) => {
-    if (!HIDDEN_RAIL_ICON_INDICES.has(index)) return;
-    image.style.display = "none";
-    image.style.pointerEvents = "none";
-    image.dataset.pycollabHidden = "1";
+    if (HIDDEN_RAIL_ICON_INDICES.has(index)) {
+      image.style.display = "none";
+      image.style.pointerEvents = "none";
+      image.dataset.pycollabHidden = "1";
+      return;
+    }
+
+    image.style.display = "";
+    image.style.pointerEvents = "";
+    image.dataset.pycollabHidden = "0";
+    const originalTransform = image.dataset.pycollabOriginalTransform || image.getAttribute("transform") || "";
+    const targetY = packedSlotYs[visibleIndex];
+    visibleIndex += 1;
+    if (!Number.isFinite(targetY)) {
+      image.setAttribute("transform", originalTransform);
+      return;
+    }
+    image.setAttribute(
+      "transform",
+      originalTransform.replace(
+        /translate\(\s*([-\d.]+)\s*,\s*([-\d.]+)\s*\)/,
+        (_, x) => `translate(${x}, ${targetY})`,
+      ),
+    );
   });
 }
 
@@ -163,7 +195,7 @@ function patchTrashIcon() {
 
   const bin = createSvgNode("g", {
     "data-pycollab-trash-bin": "1",
-    transform: "translate(-5 5)",
+    transform: "translate(4 5)",
     fill: "none",
     stroke: "#aab3bc",
     "stroke-width": "3",

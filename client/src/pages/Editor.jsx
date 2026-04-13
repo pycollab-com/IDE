@@ -959,9 +959,10 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   };
 
   const isPybricksProject = projectUsesPybricks(project);
+  const visibleBlockDocuments = isPybricksProject ? blockDocuments : [];
   const currentFile = files.find((f) => f.id === currentFileId);
-  const currentBlockDocument = blockDocuments.find((doc) => doc.id === currentBlockDocumentId) || null;
-  const hasBlockDocuments = blockDocuments.length > 0;
+  const currentBlockDocument = visibleBlockDocuments.find((doc) => doc.id === currentBlockDocumentId) || null;
+  const hasBlockDocuments = visibleBlockDocuments.length > 0;
   const isBlockEditorActive = isPybricksProject && hasBlockDocuments && activeEditorKind === "blocks" && !!currentBlockDocument;
   const projectApiId = project?.id ?? null;
   const socketProjectId = projectApiId != null ? String(projectApiId) : null;
@@ -1008,17 +1009,21 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         ? await api.post(`/projects/access/${shareToken}`)
         : await api.get(`/projects/${id}`);
       const resolvedProjectId = res.data.id;
+      const projectIsPybricks = projectUsesPybricks(res.data);
       setProject(res.data);
       setFiles(res.data.files || []);
-      const incomingBlockDocuments = res.data.block_documents || [];
+      const incomingBlockDocuments = projectIsPybricks ? res.data.block_documents || [] : [];
       setBlockDocuments(incomingBlockDocuments);
       if (!currentFileId && res.data.files?.length) {
         setCurrentFileId(res.data.files[0].id);
       }
       if (!currentBlockDocumentId && incomingBlockDocuments.length) {
         setCurrentBlockDocumentId(incomingBlockDocuments[0].id);
+      } else if (!projectIsPybricks || incomingBlockDocuments.length === 0) {
+        setCurrentBlockDocumentId(null);
       }
-      const initialEditorKind = res.data.files?.length ? "file" : incomingBlockDocuments.length ? "blocks" : "file";
+      const initialEditorKind =
+        res.data.files?.length ? "file" : projectIsPybricks && incomingBlockDocuments.length ? "blocks" : "file";
       setActiveEditorKind(initialEditorKind);
       setTerminalOpen(initialEditorKind !== "blocks");
 
@@ -1871,6 +1876,10 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
 
   const openCreateFileMenu = () => {
     if (!canEdit) return;
+    if (!isPybricksProject) {
+      createFile("text");
+      return;
+    }
     setSidebarOpen(true);
     setCreateFileMenuOpen((prev) => !prev);
   };
@@ -1879,6 +1888,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     if (!canEdit) return;
     if (!projectApiId) return;
     if (kind !== "text" && kind !== "blocks") return;
+    if (kind === "blocks" && !isPybricksProject) return;
     setCreateFileMenuOpen(false);
     const namePrompt = kind === "blocks" ? "Block file name" : "Text file name (e.g. utils.py)";
     const name = prompt(namePrompt);
@@ -1920,7 +1930,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         if (filtered[0]?.id) {
           setCurrentFileId(filtered[0].id);
           setActiveEditorKind("file");
-        } else if (blockDocumentsRef.current.length) {
+        } else if (isPybricksProject && blockDocumentsRef.current.length) {
           setCurrentFileId(null);
           setCurrentBlockDocumentId(blockDocumentsRef.current[0].id);
           setActiveEditorKind("blocks");
@@ -1994,7 +2004,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   };
 
   const selectBlockDocument = (documentId, options = {}) => {
-    if (!documentId) return;
+    if (!documentId || !isPybricksProject) return;
     const { closeTerminal = true, preserveFollow = false } = options;
     if (followTargetId && !preserveFollow) {
       setFollowTargetId(null);
@@ -2458,15 +2468,15 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   }, [files]);
   const blockDocumentNameById = useMemo(() => {
     const mapping = new Map();
-    blockDocuments.forEach((document) => {
+    visibleBlockDocuments.forEach((document) => {
       mapping.set(document.id, document.name);
     });
     return mapping;
-  }, [blockDocuments]);
+  }, [visibleBlockDocuments]);
   const filteredEditorEntries = useMemo(() => {
     const query = fileSearch.trim().toLowerCase();
     return [
-      ...blockDocuments.map((document) => ({
+      ...visibleBlockDocuments.map((document) => ({
         kind: "blocks",
         id: document.id,
         key: `blocks-${document.id}`,
@@ -2480,7 +2490,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         name: file.name,
       })),
     ].filter((entry) => !query || entry.name.toLowerCase().includes(query));
-  }, [blockDocuments, fileSearch, files]);
+  }, [fileSearch, files, visibleBlockDocuments]);
   const followTarget = useMemo(
     () => (presence || []).find((person) => person.user_id === followTargetId) || null,
     [presence, followTargetId]
@@ -2575,7 +2585,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
             {
               key: "cmd-new-file",
               title: "Create new file",
-              subtitle: "Choose text or block, then name it",
+              subtitle: isPybricksProject ? "Choose text or block, then name it" : "Create a new text file",
               badge: "Edit",
               icon: <FiFilePlus size={14} />,
               onSelect: () => openCreateFileMenu(),
@@ -2654,6 +2664,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     files,
     currentFileId,
     activeEditorKind,
+    isPybricksProject,
     sortedTasks,
     sortedSnapshots,
     runCode,
@@ -2771,10 +2782,12 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                           <FiFile size={13} />
                           <span>Text File</span>
                         </button>
-                        <button className="es-create-file-option" onClick={() => createFile("blocks")}>
-                          <FiZap size={13} />
-                          <span>Block File</span>
-                        </button>
+                        {isPybricksProject && (
+                          <button className="es-create-file-option" onClick={() => createFile("blocks")}>
+                            <FiZap size={13} />
+                            <span>Block File</span>
+                          </button>
+                        )}
                       </div>
                     )}
                   </div>
