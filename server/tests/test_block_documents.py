@@ -200,6 +200,21 @@ def test_pybricks_host_page_is_served_directly():
     client.close()
 
 
+def test_pybricks_host_page_bypasses_spa_html_fallback():
+    client = TestClient(app)
+
+    response = client.get(
+        "/pybricks-blocks-host.html",
+        headers={"Accept": "text/html"},
+    )
+
+    assert response.status_code == 200
+    assert "Pybricks Blocks Host" in response.text
+    assert "Did you forget a semicolon somewhere" not in response.text
+
+    client.close()
+
+
 def test_blocks_op_and_snapshot_roundtrip():
     _clear_block_state()
     client = TestClient(app)

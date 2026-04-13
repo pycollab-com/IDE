@@ -1460,11 +1460,24 @@ async def spa_fallback(request: Request, call_next):
     Serve the built SPA for direct browser navigations (Accept: text/html) so
     that deep links like /projects/:id return index.html instead of hitting API routes.
     """
+    spa_passthrough_prefixes = (
+        "/docs",
+        "/redoc",
+        "/openapi",
+        "/static",
+        "/assets",
+        "/vendor",
+        "/socket.io",
+        "/admin/api",
+        "/support",
+        "/pybricks-blocks-host",
+        "/uploads",
+    )
     if (
         request.method == "GET"
         and "text/html" in request.headers.get("accept", "")
         and os.path.exists(INDEX_FILE)
-        and not request.url.path.startswith(("/docs", "/redoc", "/openapi", "/static", "/assets", "/socket.io", "/admin/api", "/support"))
+        and not request.url.path.startswith(spa_passthrough_prefixes)
     ):
         return _frontend_html_response(INDEX_FILE, request_path=request.url.path)
     return await call_next(request)
