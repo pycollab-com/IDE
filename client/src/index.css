@@ -5515,3 +5515,293 @@ button {
 .editor-statusbar-file {
   color: var(--text-muted);
 }
+
+/* PyCollab IDE local-first shell */
+.chip-accent {
+  background: color-mix(in srgb, var(--accent) 24%, transparent);
+  color: var(--text-color);
+  border: 1px solid color-mix(in srgb, var(--accent) 42%, transparent);
+}
+
+.ide-home-page {
+  min-height: 100dvh;
+  height: 100dvh;
+  padding: 28px;
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+  overflow: hidden;
+}
+
+.ide-home-header {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 20px;
+  flex: 0 0 auto;
+}
+
+.ide-home-header h1 {
+  margin: 0;
+  font-size: clamp(1.8rem, 3vw, 2.5rem);
+  line-height: 0.95;
+  letter-spacing: -0.04em;
+}
+
+.ide-home-header p {
+  margin: 6px 0 0;
+  max-width: 48rem;
+  color: var(--text-muted);
+}
+
+.ide-home-actions {
+  flex: 0 0 auto;
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px;
+}
+
+.ide-home-card {
+  padding: 20px;
+  display: grid;
+  gap: 18px;
+}
+
+.ide-home-card-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: flex-start;
+}
+
+.ide-home-card-body {
+  display: grid;
+  gap: 14px;
+}
+
+.ide-home-open-copy {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.ide-form-field {
+  display: grid;
+  gap: 8px;
+}
+
+.ide-form-field span {
+  font-size: 0.82rem;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+  opacity: 0.72;
+}
+
+.ide-inline-field {
+  display: flex;
+  gap: 10px;
+}
+
+.ide-primary-action {
+  justify-content: center;
+}
+
+.ide-home-recents {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+  padding: 18px 20px;
+}
+
+.ide-home-recents-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  flex: 0 0 auto;
+}
+
+.ide-home-recents-list {
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding-right: 4px;
+}
+
+.ide-home-recent-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 14px;
+  padding: 14px 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.02);
+}
+
+.ide-home-recent-main {
+  flex: 1;
+  min-width: 0;
+  border: none;
+  background: transparent;
+  color: inherit;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  text-align: left;
+}
+
+.ide-home-recent-icon {
+  width: 36px;
+  height: 36px;
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  background: rgba(255, 255, 255, 0.04);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--primary);
+  flex-shrink: 0;
+}
+
+.ide-home-recent-copy {
+  min-width: 0;
+  display: grid;
+  gap: 5px;
+}
+
+.ide-home-recent-title-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+}
+
+.ide-home-recent-name {
+  font-weight: 700;
+}
+
+.ide-home-recent-meta {
+  font-size: 0.82rem;
+  color: var(--text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.ide-home-recent-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.ide-empty-state {
+  padding: 16px;
+  border-radius: 16px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+  color: var(--text-muted);
+}
+
+.ide-home-alert {
+  margin: 0;
+  flex: 0 0 auto;
+}
+
+.local-editor-shell {
+  height: 100dvh;
+}
+
+.local-editor-sidebar {
+  width: 280px;
+}
+
+.local-editor-description {
+  cursor: default;
+  user-select: text;
+  word-break: break-word;
+}
+
+.local-editor-description:hover {
+  color: var(--chrome-muted-text);
+}
+
+.local-editor-entry-row {
+  position: relative;
+}
+
+.local-editor-footer {
+  margin-top: auto;
+  gap: 12px;
+}
+
+.local-editor-footer-status {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.local-editor-reveal-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.local-editor-top-alert {
+  margin: var(--space-3) var(--space-4) 0;
+  flex: 0 0 auto;
+}
+
+@media (max-width: 1100px) {
+  .ide-home-page {
+    padding: 22px;
+  }
+
+  .ide-home-actions {
+    grid-template-columns: 1fr;
+  }
+}
+
+@media (max-width: 900px) {
+  .ide-home-page {
+    padding: 16px;
+  }
+
+  .ide-home-header,
+  .ide-inline-field,
+  .ide-home-recents-head,
+  .ide-home-recent-row,
+  .ide-home-recent-actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .ide-home-recent-meta {
+    white-space: normal;
+  }
+
+  .local-editor-shell {
+    flex-direction: column;
+  }
+
+  .local-editor-sidebar {
+    width: 100%;
+    max-height: 44vh;
+    border-right: 0;
+    border-bottom: 1px solid var(--chrome-muted);
+  }
+
+  .local-editor-shell .editor-topbar {
+    padding: var(--space-3) var(--space-4);
+  }
+
+  .local-editor-shell .editor-topbar-left,
+  .local-editor-shell .editor-topbar-actions {
+    width: 100%;
+  }
+}

@@ -4,10 +4,6 @@ const resolveDefaultApiBase = () => {
   if (typeof window === "undefined") {
     return "";
   }
-  const { protocol, hostname, port } = window.location;
-  if ((hostname === "127.0.0.1" || hostname === "localhost") && port && port !== "8000") {
-    return `${protocol}//${hostname}:8000`;
-  }
   return window.location.origin;
 };
 

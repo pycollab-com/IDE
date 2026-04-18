@@ -95,6 +95,10 @@ function normalizePackageName(name) {
   return String(name || "").trim().toLowerCase();
 }
 
+function resolveAbsoluteUrl(input, fallbackBase = self.location.href) {
+  return new URL(String(input || ""), fallbackBase).toString();
+}
+
 function formatModuleNotFoundError(names) {
   const unique = [];
   const seen = new Set();
@@ -639,13 +643,14 @@ async function loadRuntime(config, buffers) {
   const base = runtimeConfig.pyodide_base_url.endsWith("/")
     ? runtimeConfig.pyodide_base_url
     : `${runtimeConfig.pyodide_base_url}/`;
+  const absoluteBase = resolveAbsoluteUrl(base);
 
   if (!self.loadPyodide) {
-    importScripts(`${base}pyodide.js`);
+    importScripts(resolveAbsoluteUrl("pyodide.js", absoluteBase));
   }
 
-  pyodide = await self.loadPyodide({ indexURL: base });
-  await hydratePyodidePackageIndex(base);
+  pyodide = await self.loadPyodide({ indexURL: absoluteBase });
+  await hydratePyodidePackageIndex(absoluteBase);
   pyodide.setStdout({
     raw: (value) => post("STDOUT", { data: rawToChunk(value) }),
   });

@@ -16,7 +16,10 @@ function makeRunId() {
 }
 
 function resolveRuntimeConfigUrl() {
-  const base = API_BASE || (typeof window !== "undefined" ? window.location.origin : "");
+  const base =
+    API_BASE ||
+    (typeof window !== "undefined" ? window.location.origin : "") ||
+    (typeof self !== "undefined" ? self.location?.href || "" : "");
   return new URL("/runtime/pyodide-config", base).toString();
 }
 
