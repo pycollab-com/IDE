@@ -3,6 +3,9 @@ __pycache__/
 env/
 *.pyc
 node_modules/
+desktop/release/
+desktop/build/
+*.dmg
 # dist/ removed - we want to track built files for deployment
 *.db
 .DS_Store
