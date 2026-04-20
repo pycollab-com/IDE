@@ -6,8 +6,8 @@ It keeps the familiar PyCollab editor feel, but removes the hosted product bagga
 
 ## Download
 
-- macOS DMG: [Download the latest release](https://github.com/pycollab-com/pythonCollab/releases/latest/download/PyCollab.IDE.dmg)
-- All builds and release notes: [GitHub Releases](https://github.com/pycollab-com/pythonCollab/releases)
+- macOS DMG: [Download the latest release](https://github.com/pycollab-com/IDE/releases/latest/download/PyCollab.IDE.dmg)
+- All builds and release notes: [GitHub Releases](https://github.com/pycollab-com/IDE/releases)
 
 ## What It Does
 
