@@ -27,10 +27,8 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 COPY --from=client-build /client/dist ./client/dist
-
 RUN addgroup --system pycollab \
 && adduser --system --ingroup pycollab pycollab \
-&& mkdir -p /app/server/uploads/profile_pictures \
 && chown -R pycollab:pycollab /app
 
 USER pycollab

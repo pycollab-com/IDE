@@ -195,18 +195,6 @@ ipcMain.handle("pycollab:choose-folder", async () => {
   return result.canceled ? null : result.filePaths[0] || null;
 });
 
-ipcMain.handle("pycollab:choose-import-source", async () => {
-  const result = await dialog.showOpenDialog(mainWindow, {
-    title: "Import Project",
-    properties: ["openFile", "openDirectory"],
-    filters: [
-      { name: "Project sources", extensions: ["zip", "py"] },
-      { name: "All files", extensions: ["*"] },
-    ],
-  });
-  return result.canceled ? null : result.filePaths[0] || null;
-});
-
 ipcMain.handle("pycollab:choose-create-location", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Choose Project Location",

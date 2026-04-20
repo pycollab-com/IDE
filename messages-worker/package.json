@@ -1,8 +1,0 @@
-{
-  "name": "pycollab-messages-worker",
-  "private": true,
-  "type": "module",
-  "dependencies": {
-    "partyserver": "0.0.75"
-  }
-}

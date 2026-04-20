@@ -3,6 +3,10 @@ __pycache__/
 env/
 *.pyc
 node_modules/
+.pytest_cache/
+.playwright-cli/
+.coderabbit/
+output/
 desktop/release/
 desktop/build/
 *.dmg
@@ -10,3 +14,4 @@ desktop/build/
 *.db
 .DS_Store
 .env
+AGENTS.md

@@ -1109,12 +1109,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
               {isBlockEditorActive ? (
                 <PybricksBlocksEditor
                   blockDocument={currentBlockDocument}
-                  socket={null}
-                  socketProjectId={null}
                   canEdit
-                  presence={[]}
-                  currentUserId={0}
-                  followPresence={null}
                   onWorkspaceJsonChange={handleBlockWorkspaceChange}
                   onGeneratedCodeChange={handleGeneratedBlockCodeChange}
                   onToggleGeneratedCodeRequest={() => setShowGeneratedBlockCode((prev) => !prev)}

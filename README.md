@@ -1,51 +1,38 @@
 # PyCollab IDE
 
-PyCollab IDE is the offline desktop branch of PyCollab.
+PyCollab IDE is the offline desktop edition of PyCollab for Python and PyBricks projects.
 
-This branch keeps the PyCollab visual identity and editor workflow, but removes the online product assumptions: no auth, no collaboration, no share codes, no profiles, no backend dependency on an internet-hosted service. The goal is a local-first robotics IDE that still feels like PyCollab, especially for PyBricks competition use.
+It keeps the familiar PyCollab editor feel, but removes the hosted product baggage: no login, no collaboration backend, no share pins, no profiles, and no internet dependency for normal local work. The goal is a fast, competition-friendly IDE for robotics teams that need local editing, local projects, and offline PyBricks workflows.
 
-## What This Branch Is
+## Download
 
-- Electron desktop shell in `desktop/`
-- Local FastAPI service for project/file/runtime APIs in `server/`
-- React/Vite renderer in `client/`
-- Folder-backed local projects with `.pycollab/` metadata
-- Two project types: normal Python and PyBricks
-- Local Pyodide runtime assets vendored into the app
+- macOS DMG: [Download the latest release](https://github.com/pycollab-com/pythonCollab/releases/latest/download/PyCollab%20IDE.dmg)
+- All builds and release notes: [GitHub Releases](https://github.com/pycollab-com/pythonCollab/releases)
 
-## Core Product Rules
+## What It Does
 
-- Preserve PyCollab familiarity inside the editor.
-- Strip online features instead of mocking them locally.
-- Keep local project flows simple: create, open folder, edit in place.
-- Prefer small, obvious code paths over compatibility layers.
-- Do not let generated junk or packaging leftovers accumulate in the branch.
+- Open local folders and work in place
+- Create local projects with Normal or PyBricks project types
+- Edit Python files in a PyCollab-style editor UI
+- Run normal Python projects with a local Pyodide runtime
+- Connect to PyBricks hubs locally over Bluetooth or wired transport
+- Use PyBricks block coding offline
+- Keep local tasks and checkpoints inside the project
 
-## Current Scope
+## What It Intentionally Does Not Do
 
-Implemented in this branch:
+- Accounts, login, or signup
+- Realtime collaboration
+- Messaging, profiles, or social features
+- Public/private hosted project sharing
+- Dependency on an internet-hosted backend
 
-- Local welcome flow for new projects and opening folders
-- Local editor flow with file tree, editor, terminal, tasks, checkpoints, and theme controls
-- Local Pyodide runtime configuration
-- Electron desktop shell and preload bridge
-- PyBricks-oriented offline project support
-- Branded macOS DMG builder in `desktop/build_dmg.py`
+## Project Structure
 
-Explicitly not part of this branch:
-
-- login/signup
-- share pins
-- realtime collaboration
-- profiles/messages/social flows
-- public/private hosted project concepts
-
-## Repository Layout
-
-- `client/`: renderer app
-- `desktop/`: Electron shell, icons, DMG packaging
-- `server/`: local IDE backend
-- `logo.png`: source image used for desktop branding assets
+- `client/` React + Vite renderer
+- `desktop/` Electron shell, preload bridge, desktop packaging
+- `server/` local FastAPI backend for project, file, task, checkpoint, and runtime APIs
+- `logo.png` source branding asset used for desktop packaging
 
 ## Development
 
@@ -83,11 +70,7 @@ Build the branded DMG:
 python3 desktop/build_dmg.py
 ```
 
-The DMG output is local-only and should not be committed.
+## Notes
 
-## Branch Hygiene
-
-- Keep docs aligned with the offline IDE, not the hosted collaborative product.
-- Do not commit local packaging outputs such as `.dmg`, `desktop/release/`, or cache files.
-- Remove dead migration code when the branch direction is clear.
-- If a change adds complexity without improving the local IDE path, it is probably the wrong change.
+- This repository is focused on the offline IDE product surface, not the original hosted collaborative app.
+- Local packaging outputs such as `.dmg` files and temporary build artifacts should stay out of git.

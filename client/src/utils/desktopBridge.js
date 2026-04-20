@@ -11,10 +11,6 @@ export async function chooseFolder() {
   return callBridge("chooseFolder", async () => null);
 }
 
-export async function chooseImportSource() {
-  return callBridge("chooseImportSource", async () => null);
-}
-
 export async function chooseCreateLocation() {
   return callBridge("chooseCreateLocation", async () => null);
 }

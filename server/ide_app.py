@@ -4,7 +4,7 @@ from typing import Optional
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
@@ -21,7 +21,6 @@ app = FastAPI(
     title="PyCollab IDE",
     docs_url="/api/docs",
     redoc_url="/api/redoc",
-    swagger_ui_oauth2_redirect_url="/api/docs/oauth2-redirect",
 )
 
 app.add_middleware(
@@ -263,24 +262,6 @@ if FRONTEND_DIST.exists():
     vendor_dir = FRONTEND_DIST / "vendor"
     if vendor_dir.is_dir():
         app.mount("/vendor", StaticFiles(directory=vendor_dir), name="vendor")
-
-    docs_dir = FRONTEND_DIST / "docs"
-    if docs_dir.is_dir():
-        @app.get("/docs")
-        async def docs_redirect():
-            return RedirectResponse(url="/docs/")
-
-        app.mount("/docs", StaticFiles(directory=docs_dir, html=True), name="docs")
-
-    support_dir = FRONTEND_DIST / "support"
-    if support_dir.is_dir():
-        @app.get("/support")
-        @app.get("/support/")
-        async def support_page():
-            support_index = support_dir / "index.html"
-            if support_index.exists():
-                return _html_response(support_index)
-            return _html_response(INDEX_FILE)
 
     pybricks_host_html = FRONTEND_DIST / "pybricks-blocks-host.html"
     pybricks_host_js = FRONTEND_DIST / "pybricks-blocks-host.js"
