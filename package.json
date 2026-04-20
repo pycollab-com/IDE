@@ -1,0 +1,7 @@
+{
+  "scripts": {
+    "client:build": "npm --prefix client run build",
+    "desktop:start": "npm --prefix desktop start",
+    "desktop:build": "npm --prefix desktop run build:mac"
+  }
+}
