@@ -29,3 +29,24 @@ export async function getDesktopContext() {
     version: "dev",
   }));
 }
+
+export function onDevicePicker(callback) {
+  if (bridge && typeof bridge.onDevicePicker === "function") {
+    return bridge.onDevicePicker(callback);
+  }
+  return () => {};
+}
+
+export async function resolveDevicePicker(requestId, deviceId) {
+  if (bridge && typeof bridge.resolveDevicePicker === "function") {
+    return bridge.resolveDevicePicker({ requestId, deviceId });
+  }
+  return { ok: false };
+}
+
+export async function cancelDevicePicker(requestId) {
+  if (bridge && typeof bridge.cancelDevicePicker === "function") {
+    return bridge.cancelDevicePicker(requestId);
+  }
+  return { ok: false };
+}
