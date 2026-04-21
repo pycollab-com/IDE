@@ -836,6 +836,43 @@ button {
   line-height: 1.5;
 }
 
+.pybricks-device-picker-modal {
+  width: min(560px, 100%);
+  padding: var(--space-5);
+}
+
+.pybricks-device-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+}
+
+.pybricks-device-option {
+  gap: var(--space-2);
+}
+
+.pybricks-device-detail {
+  word-break: break-word;
+}
+
+.pybricks-device-empty {
+  min-height: 132px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--space-3);
+  border: 1px dashed var(--border-color);
+  border-radius: var(--radius);
+  color: var(--text-muted);
+  background: var(--panel-soft);
+}
+
+.pybricks-device-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: var(--space-4);
+}
+
 /* Editor */
 .editor-shell {
   display: flex;
@@ -3412,6 +3449,37 @@ button {
   gap: 16px;
 }
 
+.ide-home-update {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 12px;
+  padding: 16px 20px;
+}
+
+.ide-home-update-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.ide-home-update-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.ide-home-update-note {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.ide-home-update-note-error {
+  color: var(--danger);
+}
+
 .ide-home-card {
   padding: 20px;
   display: grid;
@@ -3624,6 +3692,7 @@ button {
   }
 
   .ide-home-header,
+  .ide-home-update-head,
   .ide-inline-field,
   .ide-home-recents-head,
   .ide-home-recent-row,

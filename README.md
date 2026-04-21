@@ -73,4 +73,6 @@ python3 desktop/build_dmg.py
 ## Notes
 
 - This repository is focused on the offline IDE product surface, not the original hosted collaborative app.
+- Packaged desktop builds can check the public GitHub Releases feed for new versions and open the latest release for manual install.
+- Unsigned desktop builds use a manual update flow instead of in-place auto install.
 - Local packaging outputs such as `.dmg` files and temporary build artifacts should stay out of git.

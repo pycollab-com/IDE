@@ -3,19 +3,34 @@ import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
   FiArrowRight,
+  FiDownload,
   FiFolder,
   FiHardDrive,
   FiMoon,
   FiPlus,
+  FiRefreshCw,
   FiSun,
   FiTrash2,
   FiZap,
 } from "react-icons/fi";
 import api from "../api";
 import TypeModal from "./dashboards/TypeModal";
-import { chooseCreateLocation, chooseFolder } from "../utils/desktopBridge";
+import { checkAppUpdate, chooseCreateLocation, chooseFolder, openAppUpdate } from "../utils/desktopBridge";
 
-export default function WelcomePage({ theme, toggleTheme }) {
+function formatReleaseDate(value) {
+  if (!value) return "";
+  try {
+    return new Date(value).toLocaleDateString([], {
+      year: "numeric",
+      month: "short",
+      day: "numeric",
+    });
+  } catch {
+    return "";
+  }
+}
+
+export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
   const navigate = useNavigate();
   const [recents, setRecents] = useState([]);
   const [loading, setLoading] = useState(true);
@@ -24,6 +39,12 @@ export default function WelcomePage({ theme, toggleTheme }) {
   const [createLocation, setCreateLocation] = useState("");
   const [creating, setCreating] = useState(false);
   const [typeModalOpen, setTypeModalOpen] = useState(false);
+  const [updateState, setUpdateState] = useState({
+    loading: false,
+    checked: false,
+    error: "",
+    result: null,
+  });
 
   const loadRecents = async () => {
     setLoading(true);
@@ -41,6 +62,39 @@ export default function WelcomePage({ theme, toggleTheme }) {
   useEffect(() => {
     loadRecents();
   }, []);
+
+  const loadUpdate = async () => {
+    if (!desktopContext?.isDesktop) {
+      return;
+    }
+
+    setUpdateState((prev) => ({
+      ...prev,
+      loading: true,
+      error: "",
+    }));
+
+    try {
+      const result = await checkAppUpdate();
+      setUpdateState({
+        loading: false,
+        checked: true,
+        error: result?.ok ? "" : result?.error || "Could not check for updates.",
+        result: result?.ok ? result : null,
+      });
+    } catch (err) {
+      setUpdateState({
+        loading: false,
+        checked: true,
+        error: err?.message || "Could not check for updates.",
+        result: null,
+      });
+    }
+  };
+
+  useEffect(() => {
+    loadUpdate();
+  }, [desktopContext?.isDesktop, desktopContext?.version]);
 
   const openProject = (project) => navigate(`/projects/${project.id}`);
 
@@ -104,6 +158,10 @@ export default function WelcomePage({ theme, toggleTheme }) {
     }
   };
 
+  const updateInfo = updateState.result;
+  const releaseDate = formatReleaseDate(updateInfo?.published_at);
+  const updateTargetUrl = updateInfo?.download_url || updateInfo?.release_url || "";
+
   return (
     <main className="ide-home-page">
       <header className="ide-home-header">
@@ -117,6 +175,50 @@ export default function WelcomePage({ theme, toggleTheme }) {
       </header>
 
       {error && <div className="alert alert-error ide-home-alert">{error}</div>}
+
+      <section className="panel ide-home-update">
+        <div className="ide-home-update-head">
+          <div>
+            <div className="panel-title">App update</div>
+            <div className="muted">
+              Current version {desktopContext?.version || "dev"}
+              {updateInfo?.latest_version ? ` · Latest release ${updateInfo.latest_version}` : ""}
+              {releaseDate ? ` · Published ${releaseDate}` : ""}
+            </div>
+          </div>
+          <div className="ide-home-update-actions">
+            {updateInfo?.update_available ? (
+              <span className="chip chip-success">Update available</span>
+            ) : updateState.checked && !updateState.error ? (
+              <span className="chip chip-muted">Up to date</span>
+            ) : null}
+            <button className="btn-secondary" type="button" onClick={loadUpdate} disabled={updateState.loading}>
+              <FiRefreshCw size={14} />
+              {updateState.loading ? "Checking..." : "Check again"}
+            </button>
+            {updateState.checked && (
+              <button
+                className="btn-secondary"
+                type="button"
+                onClick={() => openAppUpdate(updateTargetUrl || "https://github.com/pycollab-com/IDE/releases")}
+              >
+                <FiDownload size={14} />
+                {updateInfo?.update_available ? "Download update" : "View releases"}
+              </button>
+            )}
+          </div>
+        </div>
+        {updateState.error ? (
+          <div className="ide-home-update-note ide-home-update-note-error">{updateState.error}</div>
+        ) : updateInfo?.update_available ? (
+          <div className="ide-home-update-note">
+            A newer GitHub release is available. Download the {updateInfo.asset_name || "latest build"}, replace the app in
+            Applications, and relaunch.
+          </div>
+        ) : (
+          <div className="ide-home-update-note">Unsigned builds use a manual update flow. New releases open in the browser instead of installing in place.</div>
+        )}
+      </section>
 
       <section className="ide-home-actions">
         <motion.article className="panel ide-home-card" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
