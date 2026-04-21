@@ -29,3 +29,43 @@ export async function getDesktopContext() {
     version: "dev",
   }));
 }
+
+export async function checkAppUpdate() {
+  return callBridge("checkAppUpdate", async () => ({
+    ok: false,
+    error: "Desktop updates are only available in the packaged app.",
+    current_version: "dev",
+  }));
+}
+
+export async function openAppUpdate(targetUrl) {
+  if (bridge && typeof bridge.openAppUpdate === "function") {
+    return bridge.openAppUpdate(targetUrl);
+  }
+  if (targetUrl) {
+    window.open(targetUrl, "_blank", "noopener,noreferrer");
+    return { ok: true };
+  }
+  return { ok: false };
+}
+
+export function onDevicePicker(callback) {
+  if (bridge && typeof bridge.onDevicePicker === "function") {
+    return bridge.onDevicePicker(callback);
+  }
+  return () => {};
+}
+
+export async function resolveDevicePicker(requestId, deviceId) {
+  if (bridge && typeof bridge.resolveDevicePicker === "function") {
+    return bridge.resolveDevicePicker({ requestId, deviceId });
+  }
+  return { ok: false };
+}
+
+export async function cancelDevicePicker(requestId) {
+  if (bridge && typeof bridge.cancelDevicePicker === "function") {
+    return bridge.cancelDevicePicker(requestId);
+  }
+  return { ok: false };
+}

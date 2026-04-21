@@ -12,10 +12,10 @@ from PIL import Image, ImageDraw, ImageFilter, ImageFont
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 DESKTOP_DIR = REPO_ROOT / "desktop"
-APP_PATH = Path("/Applications/PyCollab IDE.app")
+RELEASE_DIR = DESKTOP_DIR / "release"
 LOGO_PATH = REPO_ROOT / "logo.png"
 ICON_PATH = DESKTOP_DIR / "assets" / "PyCollabIDE.icns"
-OUTPUT_DMG = REPO_ROOT / "PyCollab IDE.dmg"
+OUTPUT_DMG = REPO_ROOT / "PyCollab.IDE.dmg"
 VOLUME_NAME = "PyCollab IDE"
 BACKGROUND_SIZE = (1180, 730)
 WINDOW_BOUNDS = (170, 130, 1350, 860)
@@ -33,6 +33,13 @@ GRID = "#2A292D"
 
 def run(cmd: list[str], **kwargs):
     subprocess.run(cmd, check=True, **kwargs)
+
+
+def resolve_packaged_app() -> Path:
+    matches = list(RELEASE_DIR.glob("PyCollab IDE-darwin-*/PyCollab IDE.app"))
+    if not matches:
+        raise SystemExit(f"Missing packaged app bundle under {RELEASE_DIR}. Run `npm --prefix desktop run build:mac` first.")
+    return max(matches, key=lambda candidate: candidate.stat().st_mtime)
 
 
 def font(size: int, bold: bool = False):
@@ -176,8 +183,7 @@ def wait_for_finder_metadata(mount_path: Path, timeout_seconds: int = 12):
 
 
 def main():
-    if not APP_PATH.exists():
-        raise SystemExit(f"Missing app bundle: {APP_PATH}")
+    app_path = resolve_packaged_app()
 
     temp_root = Path(tempfile.mkdtemp(prefix="pycollab-dmg-"))
     stage_dir = temp_root / "stage"
@@ -190,7 +196,7 @@ def main():
         background_dir.mkdir(parents=True, exist_ok=True)
 
         generate_background(background_png)
-        shutil.copytree(APP_PATH, stage_dir / APP_PATH.name, dirs_exist_ok=True)
+        shutil.copytree(app_path, stage_dir / app_path.name, dirs_exist_ok=True)
         shutil.copy2(ICON_PATH, stage_dir / ".VolumeIcon.icns")
         applications_link = stage_dir / "Applications"
         if applications_link.exists() or applications_link.is_symlink():

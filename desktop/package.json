@@ -1,12 +1,16 @@
 {
   "name": "pycollab-ide-desktop",
   "productName": "PyCollab IDE",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "private": true,
   "main": "main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/pycollab-com/IDE.git"
+  },
   "scripts": {
     "start": "electron .",
-    "build:mac": "electron-packager . \"PyCollab IDE\" --platform=darwin --arch=arm64 --out=release --overwrite --app-bundle-id=com.pycollab.ide --icon=assets/PyCollabIDE.icns --extra-resource=../server --extra-resource=../client/dist"
+    "build:mac": "electron-packager . \"PyCollab IDE\" --platform=darwin --arch=arm64 --out=release --overwrite --prune=true --ignore='^/node_modules($|/)' --ignore='^/release($|/)' --app-bundle-id=com.pycollab.ide --app-version=$npm_package_version --build-version=$npm_package_version --icon=assets/PyCollabIDE.icns --extra-resource=../server --extra-resource=../client/dist"
   },
   "devDependencies": {
     "@electron/packager": "^18.4.4",
