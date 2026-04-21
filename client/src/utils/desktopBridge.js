@@ -30,6 +30,25 @@ export async function getDesktopContext() {
   }));
 }
 
+export async function checkAppUpdate() {
+  return callBridge("checkAppUpdate", async () => ({
+    ok: false,
+    error: "Desktop updates are only available in the packaged app.",
+    current_version: "dev",
+  }));
+}
+
+export async function openAppUpdate(targetUrl) {
+  if (bridge && typeof bridge.openAppUpdate === "function") {
+    return bridge.openAppUpdate(targetUrl);
+  }
+  if (targetUrl) {
+    window.open(targetUrl, "_blank", "noopener,noreferrer");
+    return { ok: true };
+  }
+  return { ok: false };
+}
+
 export function onDevicePicker(callback) {
   if (bridge && typeof bridge.onDevicePicker === "function") {
     return bridge.onDevicePicker(callback);

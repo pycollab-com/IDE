@@ -3449,6 +3449,37 @@ button {
   gap: 16px;
 }
 
+.ide-home-update {
+  flex: 0 0 auto;
+  display: grid;
+  gap: 12px;
+  padding: 16px 20px;
+}
+
+.ide-home-update-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+}
+
+.ide-home-update-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.ide-home-update-note {
+  font-size: 0.9rem;
+  color: var(--text-muted);
+}
+
+.ide-home-update-note-error {
+  color: var(--danger);
+}
+
 .ide-home-card {
   padding: 20px;
   display: grid;
@@ -3661,6 +3692,7 @@ button {
   }
 
   .ide-home-header,
+  .ide-home-update-head,
   .ide-inline-field,
   .ide-home-recents-head,
   .ide-home-recent-row,

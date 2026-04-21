@@ -13,6 +13,9 @@ const logFile = "/tmp/pycollab-ide.log";
 let devicePermissionsRegistered = false;
 let nextDeviceRequestId = 1;
 let pendingDeviceRequest = null;
+const RELEASE_OWNER = "pycollab-com";
+const RELEASE_REPO = "IDE";
+const RELEASES_API_URL = `https://api.github.com/repos/${RELEASE_OWNER}/${RELEASE_REPO}/releases/latest`;
 
 function appendLog(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`;
@@ -21,6 +24,91 @@ function appendLog(message) {
   } catch {
     // Ignore logging failures.
   }
+}
+
+function normalizeVersion(value) {
+  const normalized = String(value || "").trim();
+  const match = normalized.match(/(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?)/);
+  return (match ? match[1] : normalized.replace(/^v/i, "")).split("+")[0];
+}
+
+function compareVersions(left, right) {
+  const leftParts = normalizeVersion(left)
+    .split(".")
+    .map((part) => Number.parseInt(part, 10) || 0);
+  const rightParts = normalizeVersion(right)
+    .split(".")
+    .map((part) => Number.parseInt(part, 10) || 0);
+  const maxLength = Math.max(leftParts.length, rightParts.length);
+
+  for (let index = 0; index < maxLength; index += 1) {
+    const leftValue = leftParts[index] || 0;
+    const rightValue = rightParts[index] || 0;
+    if (leftValue > rightValue) return 1;
+    if (leftValue < rightValue) return -1;
+  }
+
+  return 0;
+}
+
+function chooseReleaseAsset(assets) {
+  const candidates = Array.isArray(assets) ? assets.filter((asset) => asset?.browser_download_url) : [];
+
+  if (process.platform === "darwin") {
+    return (
+      candidates.find((asset) => /\.dmg$/i.test(asset.name || "")) ||
+      candidates.find((asset) => /\.zip$/i.test(asset.name || ""))
+    );
+  }
+
+  if (process.platform === "win32") {
+    return (
+      candidates.find((asset) => /\.exe$/i.test(asset.name || "")) ||
+      candidates.find((asset) => /\.msix$/i.test(asset.name || "")) ||
+      candidates.find((asset) => /\.nupkg$/i.test(asset.name || ""))
+    );
+  }
+
+  return null;
+}
+
+async function fetchLatestReleaseInfo() {
+  appendLog(`Checking GitHub release feed ${RELEASES_API_URL}`);
+
+  const response = await fetch(RELEASES_API_URL, {
+    headers: {
+      Accept: "application/vnd.github+json",
+      "User-Agent": "PyCollab IDE",
+    },
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub release check failed with status ${response.status}`);
+  }
+
+  const release = await response.json();
+  const currentVersion = normalizeVersion(app.getVersion());
+  const latestVersion = normalizeVersion(release.tag_name || release.name || "");
+
+  if (!latestVersion) {
+    throw new Error("GitHub release response did not include a version tag.");
+  }
+
+  const asset = chooseReleaseAsset(release.assets);
+  const updateAvailable = compareVersions(latestVersion, currentVersion) > 0;
+
+  return {
+    checked_at: new Date().toISOString(),
+    current_version: currentVersion,
+    latest_version: latestVersion,
+    update_available: updateAvailable,
+    release_name: release.name || release.tag_name || latestVersion,
+    release_url: release.html_url || `https://github.com/${RELEASE_OWNER}/${RELEASE_REPO}/releases`,
+    download_url: asset?.browser_download_url || null,
+    asset_name: asset?.name || null,
+    published_at: release.published_at || null,
+    notes: typeof release.body === "string" ? release.body : "",
+  };
 }
 
 function resolvePythonCommand() {
@@ -417,6 +505,31 @@ ipcMain.handle("pycollab:get-desktop-context", async () => ({
   version: app.getVersion(),
 }));
 
+ipcMain.handle("pycollab:check-app-update", async () => {
+  try {
+    return {
+      ok: true,
+      ...await fetchLatestReleaseInfo(),
+    };
+  } catch (error) {
+    appendLog(`Update check failed: ${error?.stack || error}`);
+    return {
+      ok: false,
+      error: error?.message || "Could not check for updates.",
+      current_version: normalizeVersion(app.getVersion()),
+    };
+  }
+});
+
+ipcMain.handle("pycollab:open-app-update", async (event, targetUrl) => {
+  const nextUrl = String(targetUrl || "").trim();
+  if (!nextUrl || !/^https:\/\//i.test(nextUrl)) {
+    return { ok: false };
+  }
+  await shell.openExternal(nextUrl);
+  return { ok: true };
+});
+
 ipcMain.handle("pycollab:resolve-device-picker", async (event, payload) => {
   const requestId = String(payload?.requestId || "");
   const deviceId = String(payload?.deviceId || "");
@@ -440,7 +553,10 @@ ipcMain.handle("pycollab:cancel-device-picker", async (event, requestId) => {
   return { ok: true };
 });
 
-app.whenReady().then(createMainWindow);
+app.whenReady().then(createMainWindow).catch((error) => {
+  console.error(error);
+  app.quit();
+});
 
 app.on("window-all-closed", () => {
   if (process.platform !== "darwin") {
