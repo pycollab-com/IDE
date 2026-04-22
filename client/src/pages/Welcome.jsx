@@ -15,7 +15,7 @@ import {
 } from "react-icons/fi";
 import api from "../api";
 import TypeModal from "./dashboards/TypeModal";
-import { checkAppUpdate, chooseCreateLocation, chooseFolder, openAppUpdate } from "../utils/desktopBridge";
+import { checkAppUpdate, chooseCreateLocation, chooseFolder, chooseImportSource, openAppUpdate } from "../utils/desktopBridge";
 
 function formatReleaseDate(value) {
   if (!value) return "";
@@ -109,6 +109,17 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
     }
   };
 
+  const handleImportProject = async () => {
+    const sourcePath = await chooseImportSource();
+    if (!sourcePath) return;
+    try {
+      const res = await api.post("/ide/projects/import", { source_path: sourcePath });
+      navigate(`/projects/${res.data.id}`);
+    } catch (err) {
+      setError(err.response?.data?.detail || "Could not import project.");
+    }
+  };
+
   const handlePickLocation = async () => {
     const selectedPath = await chooseCreateLocation();
     if (selectedPath) {
@@ -161,6 +172,7 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
   const updateInfo = updateState.result;
   const releaseDate = formatReleaseDate(updateInfo?.published_at);
   const updateTargetUrl = updateInfo?.download_url || updateInfo?.release_url || "";
+  const showUpdatePanel = Boolean(updateState.error || updateInfo?.update_available);
 
   return (
     <main className="ide-home-page">
@@ -176,49 +188,45 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
 
       {error && <div className="alert alert-error ide-home-alert">{error}</div>}
 
-      <section className="panel ide-home-update">
-        <div className="ide-home-update-head">
-          <div>
-            <div className="panel-title">App update</div>
-            <div className="muted">
-              Current version {desktopContext?.version || "dev"}
-              {updateInfo?.latest_version ? ` · Latest release ${updateInfo.latest_version}` : ""}
-              {releaseDate ? ` · Published ${releaseDate}` : ""}
+      {showUpdatePanel && (
+        <section className="panel ide-home-update">
+          <div className="ide-home-update-head">
+            <div>
+              <div className="panel-title">App update</div>
+              <div className="muted">
+                Current version {desktopContext?.version || "dev"}
+                {updateInfo?.latest_version ? ` · Latest release ${updateInfo.latest_version}` : ""}
+                {releaseDate ? ` · Published ${releaseDate}` : ""}
+              </div>
+            </div>
+            <div className="ide-home-update-actions">
+              {updateInfo?.update_available ? <span className="chip chip-success">Update available</span> : null}
+              <button className="btn-secondary" type="button" onClick={loadUpdate} disabled={updateState.loading}>
+                <FiRefreshCw size={14} />
+                {updateState.loading ? "Checking..." : "Check again"}
+              </button>
+              {updateState.checked && (
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={() => openAppUpdate(updateTargetUrl || "https://github.com/pycollab-com/IDE/releases")}
+                >
+                  <FiDownload size={14} />
+                  {updateInfo?.update_available ? "Download update" : "View releases"}
+                </button>
+              )}
             </div>
           </div>
-          <div className="ide-home-update-actions">
-            {updateInfo?.update_available ? (
-              <span className="chip chip-success">Update available</span>
-            ) : updateState.checked && !updateState.error ? (
-              <span className="chip chip-muted">Up to date</span>
-            ) : null}
-            <button className="btn-secondary" type="button" onClick={loadUpdate} disabled={updateState.loading}>
-              <FiRefreshCw size={14} />
-              {updateState.loading ? "Checking..." : "Check again"}
-            </button>
-            {updateState.checked && (
-              <button
-                className="btn-secondary"
-                type="button"
-                onClick={() => openAppUpdate(updateTargetUrl || "https://github.com/pycollab-com/IDE/releases")}
-              >
-                <FiDownload size={14} />
-                {updateInfo?.update_available ? "Download update" : "View releases"}
-              </button>
-            )}
-          </div>
-        </div>
-        {updateState.error ? (
-          <div className="ide-home-update-note ide-home-update-note-error">{updateState.error}</div>
-        ) : updateInfo?.update_available ? (
-          <div className="ide-home-update-note">
-            A newer GitHub release is available. Download the {updateInfo.asset_name || "latest build"}, replace the app in
-            Applications, and relaunch.
-          </div>
-        ) : (
-          <div className="ide-home-update-note">Unsigned builds use a manual update flow. New releases open in the browser instead of installing in place.</div>
-        )}
-      </section>
+          {updateState.error ? (
+            <div className="ide-home-update-note ide-home-update-note-error">{updateState.error}</div>
+          ) : (
+            <div className="ide-home-update-note">
+              A newer GitHub release is available. Download the {updateInfo.asset_name || "latest build"}, replace the app in
+              Applications, and relaunch.
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="ide-home-actions">
         <motion.article className="panel ide-home-card" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
@@ -273,6 +281,27 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
             <button className="btn btn-primary ide-primary-action" type="button" onClick={handleOpenFolder}>
               <FiFolder size={14} />
               Open local folder
+            </button>
+          </div>
+        </motion.article>
+
+        <motion.article
+          className="panel ide-home-card"
+          initial={{ opacity: 0, y: 20 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ delay: 0.1 }}
+        >
+          <div className="ide-home-card-head">
+            <div>
+              <div className="panel-title">Import project</div>
+              <div className="muted">Import a `.zip`, `.py`, or existing folder into the local IDE library.</div>
+            </div>
+            <FiDownload size={18} />
+          </div>
+          <div className="ide-home-card-body">
+            <button className="btn btn-primary ide-primary-action" type="button" onClick={handleImportProject}>
+              <FiDownload size={14} />
+              Import project
             </button>
           </div>
         </motion.article>
