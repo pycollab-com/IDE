@@ -313,6 +313,18 @@ function finishPendingDeviceRequest(selectionId = null) {
   return true;
 }
 
+function refreshPendingDeviceRequest({ kind, callback, nextDevices = [] }) {
+  if (!pendingDeviceRequest || pendingDeviceRequest.kind !== kind) {
+    return false;
+  }
+
+  pendingDeviceRequest.callback = callback;
+  pendingDeviceRequest.rawDevices = nextDevices;
+  updatePendingDeviceRequestDevices(pendingDeviceRequest, nextDevices);
+  appendLog(`Refreshed device picker id=${pendingDeviceRequest.id} kind=${kind} devices=${nextDevices.length}`);
+  return true;
+}
+
 function beginPendingDeviceRequest({ kind, callback, initialDevices = [], refreshDevices = null }) {
   if (pendingDeviceRequest) {
     appendLog(`Cancelling stale device picker id=${pendingDeviceRequest.id} kind=${pendingDeviceRequest.kind}`);
@@ -385,6 +397,9 @@ function registerDevicePermissions() {
   ses.on("select-usb-device", (event, details, callback) => {
     event.preventDefault();
     const initialDevices = normalizeUsbDevices(details?.deviceList);
+    if (refreshPendingDeviceRequest({ kind: "usb", callback, nextDevices: initialDevices })) {
+      return;
+    }
     beginPendingDeviceRequest({
       kind: "usb",
       callback,
@@ -458,11 +473,13 @@ async function createMainWindow() {
         .map((device) => `${device.name}:${device.id}`)
         .join(", ")}`
     );
+    if (refreshPendingDeviceRequest({ kind: "bluetooth", callback, nextDevices: devices })) {
+      return;
+    }
     beginPendingDeviceRequest({
       kind: "bluetooth",
       callback,
       initialDevices: devices,
-      refreshDevices: () => normalizeBluetoothDevices(deviceList),
     });
   });
 
@@ -487,6 +504,19 @@ ipcMain.handle("pycollab:choose-create-location", async () => {
   const result = await dialog.showOpenDialog(mainWindow, {
     title: "Choose Project Location",
     properties: ["openDirectory", "createDirectory"],
+  });
+  return result.canceled ? null : result.filePaths[0] || null;
+});
+
+ipcMain.handle("pycollab:choose-import-source", async () => {
+  const result = await dialog.showOpenDialog(mainWindow, {
+    title: "Import Project",
+    properties: ["openFile", "openDirectory", "createDirectory"],
+    filters: [
+      { name: "Supported project sources", extensions: ["zip", "py"] },
+      { name: "ZIP archives", extensions: ["zip"] },
+      { name: "Python files", extensions: ["py"] },
+    ],
   });
   return result.canceled ? null : result.filePaths[0] || null;
 });

@@ -15,6 +15,10 @@ export async function chooseCreateLocation() {
   return callBridge("chooseCreateLocation", async () => null);
 }
 
+export async function chooseImportSource() {
+  return callBridge("chooseImportSource", async () => null);
+}
+
 export async function revealPath(path) {
   if (bridge && typeof bridge.revealPath === "function") {
     return bridge.revealPath(path);

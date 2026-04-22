@@ -3,6 +3,7 @@ const { contextBridge, ipcRenderer } = require("electron");
 contextBridge.exposeInMainWorld("pycollabDesktop", {
   chooseFolder: () => ipcRenderer.invoke("pycollab:choose-folder"),
   chooseCreateLocation: () => ipcRenderer.invoke("pycollab:choose-create-location"),
+  chooseImportSource: () => ipcRenderer.invoke("pycollab:choose-import-source"),
   revealPath: (targetPath) => ipcRenderer.invoke("pycollab:reveal-path", targetPath),
   getDesktopContext: () => ipcRenderer.invoke("pycollab:get-desktop-context"),
   checkAppUpdate: () => ipcRenderer.invoke("pycollab:check-app-update"),
