@@ -15,7 +15,7 @@ import {
 } from "react-icons/fi";
 import api from "../api";
 import TypeModal from "./dashboards/TypeModal";
-import { checkAppUpdate, chooseCreateLocation, chooseFolder, chooseImportSource, openAppUpdate } from "../utils/desktopBridge";
+import { checkAppUpdate, chooseCreateLocation, chooseImportSource, openAppUpdate } from "../utils/desktopBridge";
 
 function formatReleaseDate(value) {
   if (!value) return "";
@@ -98,25 +98,17 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
 
   const openProject = (project) => navigate(`/projects/${project.id}`);
 
-  const handleOpenFolder = async () => {
-    const folderPath = await chooseFolder();
-    if (!folderPath) return;
-    try {
-      const res = await api.post("/ide/projects/open-folder", { folder_path: folderPath });
-      navigate(`/projects/${res.data.id}`);
-    } catch (err) {
-      setError(err.response?.data?.detail || "Could not open folder.");
-    }
-  };
-
-  const handleImportProject = async () => {
+  const handleOpenProject = async () => {
     const sourcePath = await chooseImportSource();
     if (!sourcePath) return;
+    const normalizedPath = sourcePath.toLowerCase();
     try {
-      const res = await api.post("/ide/projects/import", { source_path: sourcePath });
+      const res = normalizedPath.endsWith(".zip") || normalizedPath.endsWith(".py")
+        ? await api.post("/ide/projects/import", { source_path: sourcePath })
+        : await api.post("/ide/projects/open-folder", { folder_path: sourcePath });
       navigate(`/projects/${res.data.id}`);
     } catch (err) {
-      setError(err.response?.data?.detail || "Could not import project.");
+      setError(err.response?.data?.detail || "Could not open project.");
     }
   };
 
@@ -179,7 +171,7 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
       <header className="ide-home-header">
         <div>
           <h1>Projects</h1>
-          <p>Open a local folder or create a new Normal or PyBricks project on disk.</p>
+          <p>Open an existing project or create a new Normal or PyBricks project on disk.</p>
         </div>
         <button className="btn-ghost nav-icon-btn" onClick={toggleTheme} title="Toggle theme">
           {theme === "dark" ? <FiSun size={18} /> : <FiMoon size={18} />}
@@ -272,36 +264,15 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
         >
           <div className="ide-home-card-head">
             <div>
-              <div className="panel-title">Open folder</div>
-              <div className="muted">Open an existing local codebase in place.</div>
+              <div className="panel-title">Open project</div>
+              <div className="muted">Open a local folder in place, or bring in a `.zip` or `.py` file.</div>
             </div>
             <FiFolder size={18} />
           </div>
           <div className="ide-home-card-body">
-            <button className="btn btn-primary ide-primary-action" type="button" onClick={handleOpenFolder}>
+            <button className="btn btn-primary ide-primary-action" type="button" onClick={handleOpenProject}>
               <FiFolder size={14} />
-              Open local folder
-            </button>
-          </div>
-        </motion.article>
-
-        <motion.article
-          className="panel ide-home-card"
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          transition={{ delay: 0.1 }}
-        >
-          <div className="ide-home-card-head">
-            <div>
-              <div className="panel-title">Import project</div>
-              <div className="muted">Import a `.zip`, `.py`, or existing folder into the local IDE library.</div>
-            </div>
-            <FiDownload size={18} />
-          </div>
-          <div className="ide-home-card-body">
-            <button className="btn btn-primary ide-primary-action" type="button" onClick={handleImportProject}>
-              <FiDownload size={14} />
-              Import project
+              Open project
             </button>
           </div>
         </motion.article>
