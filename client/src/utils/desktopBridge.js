@@ -53,6 +53,13 @@ export async function openAppUpdate(targetUrl) {
   return { ok: false };
 }
 
+export async function openBluetoothSettings() {
+  if (bridge && typeof bridge.openBluetoothSettings === "function") {
+    return bridge.openBluetoothSettings();
+  }
+  return { ok: false };
+}
+
 export function onDevicePicker(callback) {
   if (bridge && typeof bridge.onDevicePicker === "function") {
     return bridge.onDevicePicker(callback);

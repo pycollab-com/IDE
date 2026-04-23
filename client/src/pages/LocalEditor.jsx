@@ -31,7 +31,13 @@ import PybricksBlocksEditor from "../pybricks-blocks/ui/PybricksBlocksEditor";
 import { PROJECT_TYPE_PYBRICKS } from "../projects/projectTypes";
 import PybricksRunner from "../runtime/pybricksRunner";
 import PyodideRunner from "../runtime/pyodideRunner";
-import { cancelDevicePicker, onDevicePicker, resolveDevicePicker, revealPath } from "../utils/desktopBridge";
+import {
+  cancelDevicePicker,
+  onDevicePicker,
+  openBluetoothSettings,
+  resolveDevicePicker,
+  revealPath,
+} from "../utils/desktopBridge";
 
 const MAX_PROMPT_LENGTH = 120;
 
@@ -471,6 +477,13 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
       setError(err.message || "Could not cancel device selection.");
     } finally {
       setPybricksDevicePicker(null);
+    }
+  };
+
+  const openPybricksBluetoothSettings = async () => {
+    const result = await openBluetoothSettings();
+    if (!result?.ok) {
+      setError(result?.error || "Could not open Bluetooth settings.");
     }
   };
 
@@ -1173,11 +1186,20 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
                 ) : (
                   <div className="pybricks-device-empty">
                     <FiRefreshCw size={18} />
-                    <span>Searching for available hubs…</span>
+                    <span>
+                      {pybricksDevicePicker.kind === "usb"
+                        ? "Searching for available hubs…"
+                        : "Searching for available hubs. If macOS blocks Bluetooth access, open Bluetooth settings and allow PyCollab IDE."}
+                    </span>
                   </div>
                 )}
 
                 <div className="pybricks-device-actions">
+                  {pybricksDevicePicker.kind === "bluetooth" && !pybricksDevicePicker.devices?.length ? (
+                    <button className="btn btn-ghost" onClick={openPybricksBluetoothSettings}>
+                      Open Bluetooth Settings
+                    </button>
+                  ) : null}
                   <button className="btn btn-ghost" onClick={cancelPybricksDeviceSelection}>
                     Cancel
                   </button>

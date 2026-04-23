@@ -8,6 +8,7 @@ contextBridge.exposeInMainWorld("pycollabDesktop", {
   getDesktopContext: () => ipcRenderer.invoke("pycollab:get-desktop-context"),
   checkAppUpdate: () => ipcRenderer.invoke("pycollab:check-app-update"),
   openAppUpdate: (targetUrl) => ipcRenderer.invoke("pycollab:open-app-update", targetUrl),
+  openBluetoothSettings: () => ipcRenderer.invoke("pycollab:open-bluetooth-settings"),
   onDevicePicker: (listener) => {
     const wrapped = (event, payload) => listener(payload);
     ipcRenderer.on("pycollab:device-picker", wrapped);
