@@ -15,6 +15,10 @@ export async function chooseCreateLocation() {
   return callBridge("chooseCreateLocation", async () => null);
 }
 
+export async function chooseImportSource() {
+  return callBridge("chooseImportSource", async () => null);
+}
+
 export async function revealPath(path) {
   if (bridge && typeof bridge.revealPath === "function") {
     return bridge.revealPath(path);
@@ -45,6 +49,13 @@ export async function openAppUpdate(targetUrl) {
   if (targetUrl) {
     window.open(targetUrl, "_blank", "noopener,noreferrer");
     return { ok: true };
+  }
+  return { ok: false };
+}
+
+export async function openBluetoothSettings() {
+  if (bridge && typeof bridge.openBluetoothSettings === "function") {
+    return bridge.openBluetoothSettings();
   }
   return { ok: false };
 }

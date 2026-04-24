@@ -15,7 +15,7 @@ import {
 } from "react-icons/fi";
 import api from "../api";
 import TypeModal from "./dashboards/TypeModal";
-import { checkAppUpdate, chooseCreateLocation, chooseFolder, openAppUpdate } from "../utils/desktopBridge";
+import { checkAppUpdate, chooseCreateLocation, chooseImportSource, openAppUpdate } from "../utils/desktopBridge";
 
 function formatReleaseDate(value) {
   if (!value) return "";
@@ -98,14 +98,17 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
 
   const openProject = (project) => navigate(`/projects/${project.id}`);
 
-  const handleOpenFolder = async () => {
-    const folderPath = await chooseFolder();
-    if (!folderPath) return;
+  const handleOpenProject = async () => {
+    const sourcePath = await chooseImportSource();
+    if (!sourcePath) return;
+    const normalizedPath = sourcePath.toLowerCase();
     try {
-      const res = await api.post("/ide/projects/open-folder", { folder_path: folderPath });
+      const res = normalizedPath.endsWith(".zip") || normalizedPath.endsWith(".py")
+        ? await api.post("/ide/projects/import", { source_path: sourcePath })
+        : await api.post("/ide/projects/open-folder", { folder_path: sourcePath });
       navigate(`/projects/${res.data.id}`);
     } catch (err) {
-      setError(err.response?.data?.detail || "Could not open folder.");
+      setError(err.response?.data?.detail || "Could not open project.");
     }
   };
 
@@ -161,13 +164,14 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
   const updateInfo = updateState.result;
   const releaseDate = formatReleaseDate(updateInfo?.published_at);
   const updateTargetUrl = updateInfo?.download_url || updateInfo?.release_url || "";
+  const showUpdatePanel = Boolean(updateState.error || updateInfo?.update_available);
 
   return (
     <main className="ide-home-page">
       <header className="ide-home-header">
         <div>
           <h1>Projects</h1>
-          <p>Open a local folder or create a new Normal or PyBricks project on disk.</p>
+          <p>Open an existing project or create a new Normal or PyBricks project on disk.</p>
         </div>
         <button className="btn-ghost nav-icon-btn" onClick={toggleTheme} title="Toggle theme">
           {theme === "dark" ? <FiSun size={18} /> : <FiMoon size={18} />}
@@ -176,49 +180,45 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
 
       {error && <div className="alert alert-error ide-home-alert">{error}</div>}
 
-      <section className="panel ide-home-update">
-        <div className="ide-home-update-head">
-          <div>
-            <div className="panel-title">App update</div>
-            <div className="muted">
-              Current version {desktopContext?.version || "dev"}
-              {updateInfo?.latest_version ? ` · Latest release ${updateInfo.latest_version}` : ""}
-              {releaseDate ? ` · Published ${releaseDate}` : ""}
+      {showUpdatePanel && (
+        <section className="panel ide-home-update">
+          <div className="ide-home-update-head">
+            <div>
+              <div className="panel-title">App update</div>
+              <div className="muted">
+                Current version {desktopContext?.version || "dev"}
+                {updateInfo?.latest_version ? ` · Latest release ${updateInfo.latest_version}` : ""}
+                {releaseDate ? ` · Published ${releaseDate}` : ""}
+              </div>
+            </div>
+            <div className="ide-home-update-actions">
+              {updateInfo?.update_available ? <span className="chip chip-success">Update available</span> : null}
+              <button className="btn-secondary" type="button" onClick={loadUpdate} disabled={updateState.loading}>
+                <FiRefreshCw size={14} />
+                {updateState.loading ? "Checking..." : "Check again"}
+              </button>
+              {updateState.checked && (
+                <button
+                  className="btn-secondary"
+                  type="button"
+                  onClick={() => openAppUpdate(updateTargetUrl || "https://github.com/pycollab-com/IDE/releases")}
+                >
+                  <FiDownload size={14} />
+                  {updateInfo?.update_available ? "Download update" : "View releases"}
+                </button>
+              )}
             </div>
           </div>
-          <div className="ide-home-update-actions">
-            {updateInfo?.update_available ? (
-              <span className="chip chip-success">Update available</span>
-            ) : updateState.checked && !updateState.error ? (
-              <span className="chip chip-muted">Up to date</span>
-            ) : null}
-            <button className="btn-secondary" type="button" onClick={loadUpdate} disabled={updateState.loading}>
-              <FiRefreshCw size={14} />
-              {updateState.loading ? "Checking..." : "Check again"}
-            </button>
-            {updateState.checked && (
-              <button
-                className="btn-secondary"
-                type="button"
-                onClick={() => openAppUpdate(updateTargetUrl || "https://github.com/pycollab-com/IDE/releases")}
-              >
-                <FiDownload size={14} />
-                {updateInfo?.update_available ? "Download update" : "View releases"}
-              </button>
-            )}
-          </div>
-        </div>
-        {updateState.error ? (
-          <div className="ide-home-update-note ide-home-update-note-error">{updateState.error}</div>
-        ) : updateInfo?.update_available ? (
-          <div className="ide-home-update-note">
-            A newer GitHub release is available. Download the {updateInfo.asset_name || "latest build"}, replace the app in
-            Applications, and relaunch.
-          </div>
-        ) : (
-          <div className="ide-home-update-note">Unsigned builds use a manual update flow. New releases open in the browser instead of installing in place.</div>
-        )}
-      </section>
+          {updateState.error ? (
+            <div className="ide-home-update-note ide-home-update-note-error">{updateState.error}</div>
+          ) : (
+            <div className="ide-home-update-note">
+              A newer GitHub release is available. Download the {updateInfo.asset_name || "latest build"}, replace the app in
+              Applications, and relaunch.
+            </div>
+          )}
+        </section>
+      )}
 
       <section className="ide-home-actions">
         <motion.article className="panel ide-home-card" initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }}>
@@ -264,15 +264,15 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
         >
           <div className="ide-home-card-head">
             <div>
-              <div className="panel-title">Open folder</div>
-              <div className="muted">Open an existing local codebase in place.</div>
+              <div className="panel-title">Open project</div>
+              <div className="muted">Open a local folder in place, or bring in a `.zip` or `.py` file.</div>
             </div>
             <FiFolder size={18} />
           </div>
           <div className="ide-home-card-body">
-            <button className="btn btn-primary ide-primary-action" type="button" onClick={handleOpenFolder}>
+            <button className="btn btn-primary ide-primary-action" type="button" onClick={handleOpenProject}>
               <FiFolder size={14} />
-              Open local folder
+              Open project
             </button>
           </div>
         </motion.article>
