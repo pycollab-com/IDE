@@ -1,0 +1,360 @@
+<!doctype html>
+<html lang="en" data-theme="light">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PyCollab Developer Documentation</title>
+    <meta
+      name="description"
+      content="Developer documentation for PyCollab, a browser-based collaborative Python IDE with real-time editing and in-browser execution."
+    />
+    <link rel="icon" href="./favicon.ico" sizes="any" />
+    <link rel="shortcut icon" href="./favicon.ico" />
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#main">Skip to content</a>
+
+    <header class="site-header" role="banner">
+      <div class="brand-row">
+        <button
+          class="sidebar-toggle"
+          id="sidebar-toggle"
+          type="button"
+          aria-controls="sidebar"
+          aria-expanded="false"
+        >
+          Menu
+        </button>
+
+        <a class="brand" href="#overview" aria-label="PyCollab documentation home">
+          <img src="./favicon.ico" alt="" width="20" height="20" />
+          <span>PyCollab Docs</span>
+        </a>
+
+        <label class="search-field" for="doc-search">
+          <span aria-hidden="true">Search</span>
+          <input
+            id="doc-search"
+            type="search"
+            placeholder="Search sections"
+            autocomplete="off"
+            spellcheck="false"
+          />
+          <kbd>⌘K</kbd>
+        </label>
+
+        <div class="header-actions">
+          <a class="text-link" href="https://pycollab.com" target="_blank" rel="noreferrer">Open App</a>
+          <button id="theme-toggle" type="button">Dark</button>
+        </div>
+      </div>
+      <p id="search-status" class="search-status" aria-live="polite"></p>
+    </header>
+
+    <div class="layout">
+      <aside class="sidebar" id="sidebar" aria-label="Documentation sections">
+        <nav id="sidebar-nav"></nav>
+      </aside>
+
+      <div class="sidebar-scrim" id="sidebar-scrim" hidden></div>
+
+      <main id="main" class="content" tabindex="-1">
+        <section id="overview" class="doc-section">
+          <p class="section-path">Developer documentation</p>
+          <h1>PyCollab</h1>
+          <p class="lede">
+            PyCollab is a browser-based collaborative Python IDE. Users edit the same project in real time, run Python
+            directly in the browser through Pyodide, and share workspaces with a short six-character code.
+          </p>
+
+          <div class="summary-grid">
+            <article class="summary-card">
+              <h2 id="overview-capabilities">Platform capabilities</h2>
+              <ul class="feature-list">
+                <li>Real-time collaborative editing with shared project state.</li>
+                <li>Browser-side Python execution with streamed stdout, stderr, and interactive stdin.</li>
+                <li>Project sharing with six-character codes using digits and lowercase letters.</li>
+              </ul>
+            </article>
+
+            <article class="summary-card">
+              <h2 id="overview-when-to-use">When to use PyCollab</h2>
+              <ul class="feature-list">
+                <li>Teaching Python without requiring local environment setup.</li>
+                <li>Pair programming or small-team editing sessions in the browser.</li>
+                <li>Running constrained Python workflows inside a managed runtime.</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="facts-grid" aria-label="Product facts">
+            <div class="fact">
+              <span class="fact-label">Execution</span>
+              <strong>Pyodide in a dedicated browser worker</strong>
+            </div>
+            <div class="fact">
+              <span class="fact-label">Sharing</span>
+              <strong>Six-character project codes</strong>
+            </div>
+            <div class="fact">
+              <span class="fact-label">Access</span>
+              <strong>Guest or Google-backed account access</strong>
+            </div>
+          </div>
+
+          <div class="callout">
+            The backend serves configuration, persistence, files, and collaboration state. User Python code does not run
+            on the server.
+          </div>
+        </section>
+
+        <section id="quickstart" class="doc-section">
+          <h2>Quick start</h2>
+          <p>
+            The product is designed so a new collaborator can go from a blank browser tab to a running shared Python
+            project without local Python tooling.
+          </p>
+
+          <h3 id="quickstart-open-app">Open the app</h3>
+          <p>
+            Visit <a href="https://pycollab.com" target="_blank" rel="noreferrer">pycollab.com</a>. Users can enter as
+            a guest for fast access or continue with an authenticated account.
+          </p>
+
+          <h3 id="quickstart-start-project">Start a project</h3>
+          <ol>
+            <li>Create a new project from the dashboard.</li>
+            <li>Open the starter Python file that is added automatically.</li>
+            <li>Edit files directly in the browser editor.</li>
+          </ol>
+
+          <h3 id="quickstart-share-and-join">Share and join</h3>
+          <p>
+            Generate a project share code and give it to collaborators. The code is six characters long and uses only
+            digits and lowercase letters for fast manual entry.
+          </p>
+
+          <h3 id="quickstart-run-code">Run Python</h3>
+          <p>
+            Execute the active Python file. Output streams into the terminal panel in real time, and interactive
+            <code>input()</code> prompts are supported inside the browser runtime.
+          </p>
+
+          <pre><code>print("hello from pycollab")
+name = input("Your name: ")
+print(f"Hi, {name}")</code></pre>
+        </section>
+
+        <section id="architecture" class="doc-section">
+          <h2>Architecture</h2>
+          <p>
+            PyCollab is split across a browser UI, a synchronization and persistence layer, and a client-side Python
+            runtime. The runtime boundary is the key product constraint.
+          </p>
+
+          <h3 id="architecture-stack">System layout</h3>
+          <div class="stack-diagram" aria-label="PyCollab architecture diagram">
+            <article class="diagram-card">
+              <p class="diagram-label">Client shell</p>
+              <h4>Editor and project UI</h4>
+              <p>Project dashboard, files, editor, terminal, sharing flows, and presence indicators.</p>
+            </article>
+            <article class="diagram-card">
+              <p class="diagram-label">Collaboration layer</p>
+              <h4>Live shared state</h4>
+              <p>Edits, cursor state, collaborators, and project membership are synchronized in real time.</p>
+            </article>
+            <article class="diagram-card">
+              <p class="diagram-label">Persistence layer</p>
+              <h4>Projects and uploads</h4>
+              <p>Projects, files, collaborators, and persisted uploads are stored outside the browser runtime.</p>
+            </article>
+            <article class="diagram-card">
+              <p class="diagram-label">Execution layer</p>
+              <h4>Pyodide worker</h4>
+              <p>Python executes in-browser with streamed IO and optional package policy enforcement.</p>
+            </article>
+          </div>
+
+          <h3 id="architecture-data-flow">Execution flow</h3>
+          <ol>
+            <li>The browser loads project state and collaborative editing data.</li>
+            <li>Python code is sent to a dedicated Pyodide worker inside the browser.</li>
+            <li>Stdout, stderr, and stdin messages stream between the worker and terminal UI.</li>
+            <li>Persisted files and uploads remain backend-managed, but execution stays client-side.</li>
+          </ol>
+
+          <h3 id="architecture-guarantees">Product guarantees</h3>
+          <ul class="feature-list">
+            <li>Concurrent edits are merged instead of using last-writer-wins overwrites.</li>
+            <li>Runtime initialization fails clearly when browser isolation requirements are not met.</li>
+            <li>Package loading can be constrained through backend configuration.</li>
+          </ul>
+        </section>
+
+        <section id="collaboration" class="doc-section">
+          <h2>Collaboration</h2>
+          <p>
+            Collaboration behavior is intentionally simple: shared files, short invite codes, visible remote activity,
+            and low-friction entry for users who only need to join once.
+          </p>
+
+          <h3 id="collaboration-sharing">Sharing model</h3>
+          <p>
+            Share codes are six characters long and resolve directly to a project invitation flow. This keeps the handoff
+            fast in classrooms, demos, and pair-programming sessions.
+          </p>
+
+          <h3 id="collaboration-editing">Editing model</h3>
+          <p>
+            Multiple collaborators can edit the same project concurrently. Remote cursors and selections remain visible so
+            collaborators can coordinate without leaving the editor.
+          </p>
+
+          <h3 id="collaboration-access">Access model</h3>
+          <div class="two-column-list">
+            <article>
+              <h4>Guest access</h4>
+              <p>Best for fast entry and temporary sessions where registration would only create friction.</p>
+            </article>
+            <article>
+              <h4>Account access</h4>
+              <p>Required for identity-backed ownership, collaborator management, and Google-verified email flows.</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="runtime" class="doc-section">
+          <h2>Browser runtime</h2>
+          <p>
+            Python execution is powered by Pyodide. The runtime is configured by the backend but runs in the browser, so
+            correctness depends on browser capabilities and header policy.
+          </p>
+
+          <h3 id="runtime-pyodide">Runtime contract</h3>
+          <ul class="feature-list">
+            <li>The default pinned runtime version is <code>0.29.3</code>.</li>
+            <li>Execution time limits can be enforced with a max-run-seconds setting.</li>
+            <li>Interactive stdin is supported through streamed worker messages.</li>
+          </ul>
+
+          <h3 id="runtime-isolation">Cross-origin isolation</h3>
+          <p>
+            Full-fidelity interrupts and blocking stdin require cross-origin isolation. The browser must expose
+            <code>window.crossOriginIsolated</code> as <code>true</code>.
+          </p>
+          <pre><code>Cross-Origin-Opener-Policy: same-origin
+Cross-Origin-Embedder-Policy: require-corp</code></pre>
+
+          <h3 id="runtime-packages">Package policy</h3>
+          <p>
+            Allowed packages can be constrained through a backend allowlist. This governs both runtime imports and
+            <code>micropip.install</code>.
+          </p>
+        </section>
+
+        <section id="configuration" class="doc-section">
+          <h2>Configuration</h2>
+          <p>
+            The deployment surface is intentionally small. Most runtime behavior is driven through environment variables
+            rather than a large configuration graph.
+          </p>
+
+          <h3 id="configuration-local">Local development</h3>
+          <p>Copy the example environment file and set values for your local machine.</p>
+          <pre><code>cp .env.example .env</code></pre>
+
+          <h3 id="configuration-oauth">Google OAuth</h3>
+          <p>
+            Both the backend and frontend must point to the same Google Web client ID. Email verification is Google-backed
+            only.
+          </p>
+          <pre><code>GOOGLE_OAUTH_CLIENT_ID=your_google_web_client_id
+VITE_GOOGLE_CLIENT_ID=your_google_web_client_id</code></pre>
+
+          <h3 id="configuration-reference">Environment reference</h3>
+          <div class="table-wrap">
+            <table>
+              <thead>
+                <tr>
+                  <th>Variable</th>
+                  <th>Purpose</th>
+                  <th>Default or note</th>
+                </tr>
+              </thead>
+              <tbody id="env-table"></tbody>
+            </table>
+          </div>
+        </section>
+
+        <section id="design" class="doc-section">
+          <h2>Design system</h2>
+          <p>
+            The docs use the same product palette and token source of truth as the application. The goal is clarity first:
+            short sections, direct labels, and a layout that makes change obvious.
+          </p>
+
+          <h3 id="design-palette">Product palette</h3>
+          <div id="brand-palette" class="palette-grid" role="list"></div>
+
+          <h3 id="design-foundations">Implementation baseline</h3>
+          <pre><code>:root {
+  --primary: #899878;
+  --secondary: #7f8e6d;
+  --accent: #9caa88;
+  --bg-color: #121113;
+  --text-color: #f7f7f2;
+}
+
+[data-theme="light"] {
+  --bg-color: #f7f7f2;
+  --text-color: #121113;
+}</code></pre>
+
+          <h3 id="design-tokens">Token source of truth</h3>
+          <div class="token-toolbar">
+            <a class="button-link" href="./pycollab-design-tokens.json" download>Download tokens</a>
+            <button id="copy-tokens" type="button">Copy JSON</button>
+            <span id="copy-status" class="copy-status" aria-live="polite"></span>
+          </div>
+          <pre id="token-preview" class="token-preview" tabindex="0"></pre>
+        </section>
+
+        <section id="troubleshooting" class="doc-section">
+          <h2>Troubleshooting</h2>
+          <p>Most production issues reduce to runtime policy, auth setup, or deployment storage configuration.</p>
+
+          <h3 id="troubleshooting-runtime">Runtime failures</h3>
+          <div id="runtime-issues" class="issue-grid"></div>
+
+          <h3 id="troubleshooting-auth">Authentication failures</h3>
+          <div class="callout">
+            If Google sign-in fails, verify that <code>GOOGLE_OAUTH_CLIENT_ID</code> and
+            <code>VITE_GOOGLE_CLIENT_ID</code> point to the same Google Web client ID.
+          </div>
+
+          <h3 id="troubleshooting-deploy">Deployment storage</h3>
+          <p>
+            Persisted uploads default to <code>server/uploads</code>. In production, set
+            <code>PYCOLLAB_UPLOADS_DIR</code> to the absolute path of the mounted storage volume.
+          </p>
+        </section>
+
+        <footer class="site-footer">
+          <p>
+            Source of truth: <code>README.md</code> and
+            <a href="./pycollab-design-tokens.json" target="_blank" rel="noreferrer">pycollab-design-tokens.json</a>.
+          </p>
+        </footer>
+      </main>
+
+      <aside class="toc" aria-label="On this page">
+        <p class="toc-heading">On this page</p>
+        <nav id="toc-nav"></nav>
+      </aside>
+    </div>
+
+    <script src="./app.js" type="module"></script>
+  </body>
+</html>

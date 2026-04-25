@@ -1,0 +1,125 @@
+.pybricks-blocks-shell {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  height: 100%;
+  min-height: 0;
+  background: linear-gradient(180deg, rgba(247, 247, 242, 0.95), rgba(238, 241, 232, 0.98));
+}
+
+.pybricks-blocks-shell.with-preview {
+  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.9fr);
+}
+
+.pybricks-blocks-stage {
+  position: relative;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.pybricks-blocks-canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  background: #edf1f7;
+}
+
+.pybricks-blocks-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 4;
+}
+
+.pybricks-remote-pointer {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.pybricks-remote-pointer-dot {
+  width: 12px;
+  height: 12px;
+  border-radius: 999px;
+  border: 2px solid rgba(255, 255, 255, 0.92);
+  box-shadow: 0 2px 10px rgba(18, 17, 19, 0.18);
+}
+
+.pybricks-remote-pointer-label {
+  padding: 4px 8px;
+  border-radius: 999px;
+  color: #f7f7f2;
+  font-size: 11px;
+  font-weight: 700;
+  box-shadow: 0 6px 18px rgba(18, 17, 19, 0.18);
+  white-space: nowrap;
+}
+
+.pybricks-remote-editing {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.pybricks-remote-editing-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(18, 17, 19, 0.84);
+  color: #f7f7f2;
+  font-size: 12px;
+  box-shadow: 0 10px 24px rgba(18, 17, 19, 0.2);
+}
+
+.pybricks-remote-editing-swatch {
+  width: 10px;
+  height: 10px;
+  border-radius: 999px;
+}
+
+.pybricks-generated-preview {
+  border-left: 1px solid rgba(18, 17, 19, 0.08);
+  background: rgba(18, 17, 19, 0.96);
+  color: #f7f7f2;
+  min-width: 0;
+  overflow: hidden;
+  display: flex;
+  flex-direction: column;
+}
+
+.pybricks-generated-preview-header {
+  padding: 10px 12px;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  border-bottom: 1px solid rgba(247, 247, 242, 0.12);
+}
+
+.pybricks-generated-preview pre {
+  margin: 0;
+  padding: 12px;
+  overflow: auto;
+  font-size: 12px;
+  line-height: 1.5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace;
+}
+
+@media (max-width: 1100px) {
+  .pybricks-blocks-shell.with-preview {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pybricks-generated-preview {
+    display: none;
+  }
+}
