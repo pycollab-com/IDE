@@ -1,38 +1,47 @@
 # PyCollab IDE
 
-PyCollab IDE is the offline desktop edition of PyCollab for Python and PyBricks projects.
+PyCollab IDE is the desktop app for PyCollab. It should feel like the web app, with the same account-based flow, dashboard, editor, branding, and collaboration model when online.
 
-It keeps the familiar PyCollab editor feel, but removes the hosted product baggage: no login, no collaboration backend, no share pins, no profiles, and no internet dependency for normal local work. The goal is a fast, competition-friendly IDE for robotics teams that need local editing, local projects, and offline PyBricks workflows.
+The desktop-specific responsibility is competition-safe offline access:
 
-## Download
+- Online hosted projects behave like PyCollab Web.
+- Hosted projects opened online are cached locally for later access.
+- Cached hosted projects are read-only when the app cannot reach PyCollab services.
+- Editing offline requires creating an explicit local copy.
+- Local copies are separate projects stored on the device and do not auto-sync back to the hosted project.
 
-- macOS DMG: [Download the latest release](https://github.com/pycollab-com/IDE/releases/latest/download/PyCollab.IDE.dmg)
-- All builds and release notes: [GitHub Releases](https://github.com/pycollab-com/IDE/releases)
+This avoids hidden conflict resolution while still letting teams access code during competitions where Wi-Fi may be unavailable.
 
-## What It Does
+## Product Modes
 
-- Open local folders and work in place
-- Create local projects with Normal or PyBricks project types
-- Edit Python files in a PyCollab-style editor UI
-- Run normal Python projects with a local Pyodide runtime
-- Connect to PyBricks hubs locally over Bluetooth or wired transport
-- Use PyBricks block coding offline
-- Keep local tasks and checkpoints inside the project
+### Online Hosted Mode
 
-## What It Intentionally Does Not Do
+- User signs in with the same account used on PyCollab Web.
+- Dashboard, project opening, sharing, collaboration, settings, and profiles should match Web behavior.
+- Hosted project edits go through the hosted backend and realtime channel.
+- The desktop shell should add only native affordances such as update checks, file reveal, Bluetooth permissions, and offline notices.
 
-- Accounts, login, or signup
-- Realtime collaboration
-- Messaging, profiles, or social features
-- Public/private hosted project sharing
-- Dependency on an internet-hosted backend
+### Offline Cached Mode
+
+- Available only for hosted projects previously opened while online.
+- Shows the latest locally cached project snapshot.
+- Files are read-only.
+- Realtime collaboration, share actions, messaging, and hosted mutations are unavailable.
+- The primary action is to create a local copy.
+
+### Local Copy Mode
+
+- Editable project stored on the local device.
+- Uses the local FastAPI service for files, tasks, checkpoints, runtime config, and PyBricks workflows.
+- Clearly identifies the project as a local/offline copy.
+- May preserve origin metadata, but must not pretend to be the hosted project.
 
 ## Project Structure
 
-- `client/` React + Vite renderer
-- `desktop/` Electron shell, preload bridge, desktop packaging
-- `server/` local FastAPI backend for project, file, task, checkpoint, and runtime APIs
-- `logo.png` source branding asset used for desktop packaging
+- `client/` React + Vite renderer.
+- `desktop/` Electron shell, preload bridge, desktop packaging.
+- `server/` local FastAPI service for desktop-native storage, cache, local copies, and runtime APIs.
+- `logo.png` source branding asset used for desktop packaging.
 
 ## Development
 
@@ -72,7 +81,6 @@ python3 desktop/build_dmg.py
 
 ## Notes
 
-- This repository is focused on the offline IDE product surface, not the original hosted collaborative app.
-- Packaged desktop builds can check the public GitHub Releases feed for new versions and open the latest release for manual install.
-- Unsigned desktop builds use a manual update flow instead of in-place auto install.
-- Local packaging outputs such as `.dmg` files and temporary build artifacts should stay out of git.
+- Keep PyCollab brand identity consistent with Web.
+- Do not make broad Web UI changes unless they are necessary to support shared desktop/web behavior.
+- Generated artifacts such as `.dmg`, `desktop/release/`, `desktop/build-temp/`, `client/dist/`, `__pycache__/`, and machine-specific outputs should stay out of commits unless explicitly intended.

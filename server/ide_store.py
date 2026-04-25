@@ -16,6 +16,7 @@ SCHEMA_VERSION = 1
 PROJECT_TYPE_NORMAL = "normal"
 PROJECT_TYPE_PYBRICKS = "pybricks"
 PROJECT_TYPES = {PROJECT_TYPE_NORMAL, PROJECT_TYPE_PYBRICKS}
+ORIGIN_KIND_HOSTED_CACHE = "hosted-cache"
 BLOCK_WORKSPACE_VERSION = 1
 PROJECT_META_DIR_NAME = ".pycollab"
 SNAPSHOT_INDEX_FILE = "index.json"
@@ -107,12 +108,17 @@ def library_home() -> Path:
     return app_home() / "library"
 
 
+def hosted_cache_home() -> Path:
+    return app_home() / "hosted-cache"
+
+
 def catalog_db_path() -> Path:
     return app_home() / "catalog.db"
 
 
 def ensure_app_home() -> None:
     library_home().mkdir(parents=True, exist_ok=True)
+    hosted_cache_home().mkdir(parents=True, exist_ok=True)
 
 
 def _catalog_connect() -> sqlite3.Connection:
@@ -202,6 +208,13 @@ def _validate_python_file_path(value: str) -> str:
     if not normalized.lower().endswith(PYTHON_FILE_SUFFIX):
         raise HTTPException(status_code=400, detail="Only Python files are supported")
     return normalized
+
+
+def _hosted_cache_path(project_id: str) -> Path:
+    normalized = str(project_id or "").strip()
+    if not normalized or "/" in normalized or "\\" in normalized or "\x00" in normalized:
+        raise HTTPException(status_code=400, detail="Invalid hosted project id")
+    return hosted_cache_home() / f"{normalized}.json"
 
 
 def _read_json(path: Path, fallback: Any) -> Any:
@@ -502,6 +515,8 @@ def _block_document_payload(root_path: Path, entry: Dict[str, Any]) -> Dict[str,
 
 
 def _project_payload(project_id: int, root_path: Path, manifest: Dict[str, Any]) -> Dict[str, Any]:
+    origin = manifest.get("origin")
+    is_offline_copy = isinstance(origin, dict) and origin.get("kind") == ORIGIN_KIND_HOSTED_CACHE
     files = [_file_payload(root_path, entry) for entry in manifest.get("files", [])]
     block_documents = [_block_document_payload(root_path, entry) for entry in manifest.get("blockDocuments", [])]
     return {
@@ -516,6 +531,9 @@ def _project_payload(project_id: int, root_path: Path, manifest: Dict[str, Any])
         "owner_name": "Local",
         "is_public": False,
         "root_path": str(root_path),
+        "origin": origin,
+        "local_project_kind": "offline-copy" if is_offline_copy else "local",
+        "is_offline_copy": is_offline_copy,
         "files": files,
         "block_documents": block_documents,
         "collaborators": [],
@@ -577,6 +595,118 @@ def import_project(source_path: str, project_type: Optional[str] = None) -> Dict
 
     state = _load_project_state(target_root, project_type=project_type)
     return _project_payload(state["project_id"], state["root_path"], state["manifest"])
+
+
+def cache_hosted_project(project_id: str, project: Dict[str, Any]) -> Dict[str, Any]:
+    if not isinstance(project, dict):
+        raise HTTPException(status_code=400, detail="Project cache payload is required")
+    cache_id = str(project_id or project.get("public_id") or project.get("id") or "").strip()
+    if not cache_id:
+        raise HTTPException(status_code=400, detail="Hosted project id is required")
+
+    files = []
+    for file_entry in project.get("files") or []:
+        name = _validate_relative_path(file_entry.get("name") or file_entry.get("path") or "")
+        files.append(
+            {
+                "id": file_entry.get("id"),
+                "name": name,
+                "content": str(file_entry.get("content") or ""),
+            }
+        )
+
+    payload = {
+        "cached_at": utc_now(),
+        "hosted_project_id": cache_id,
+        "project": {
+            "id": project.get("id"),
+            "public_id": project.get("public_id") or cache_id,
+            "name": project.get("name") or "Hosted Project",
+            "project_type": project.get("project_type") or PROJECT_TYPE_NORMAL,
+            "description": project.get("description"),
+            "owner_id": project.get("owner_id"),
+            "owner_name": project.get("owner_name"),
+            "files": files,
+            "block_documents": project.get("block_documents") or [],
+        },
+    }
+    _write_json(_hosted_cache_path(cache_id), payload)
+    return {
+        "status": "ok",
+        "hosted_project_id": cache_id,
+        "cached_at": payload["cached_at"],
+        "file_count": len(files),
+    }
+
+
+def get_hosted_project_cache(project_id: str) -> Dict[str, Any]:
+    path = _hosted_cache_path(project_id)
+    if not path.exists():
+        raise HTTPException(status_code=404, detail="No cached copy is available for this hosted project")
+    payload = _read_json(path, {})
+    payload.setdefault("hosted_project_id", str(project_id))
+    payload.setdefault("project", {})
+    return payload
+
+
+def create_local_copy_from_hosted_cache(project_id: str, name: Optional[str] = None) -> Dict[str, Any]:
+    cached = get_hosted_project_cache(project_id)
+    project = cached.get("project") or {}
+    source_name = name or f"{project.get('name') or 'Hosted Project'} Offline Copy"
+    target_root = library_home() / _safe_directory_name(source_name)
+    suffix = 2
+    while target_root.exists():
+        target_root = library_home() / f"{_safe_directory_name(source_name)}-{suffix}"
+        suffix += 1
+    target_root.mkdir(parents=True, exist_ok=True)
+
+    for file_entry in project.get("files") or []:
+        rel_path = _validate_python_file_path(file_entry.get("name") or "")
+        target = target_root / rel_path
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(str(file_entry.get("content") or ""), encoding="utf-8")
+
+    state = _load_project_state(
+        target_root,
+        project_type=project.get("project_type") or PROJECT_TYPE_NORMAL,
+        name=source_name,
+    )
+    origin = {
+        "kind": ORIGIN_KIND_HOSTED_CACHE,
+        "hostedProjectId": cached.get("hosted_project_id") or str(project_id),
+        "cachedAt": cached.get("cached_at"),
+        "copiedAt": utc_now(),
+    }
+    manifest = state["manifest"]
+    manifest["origin"] = origin
+    _save_manifest(state["root_path"], manifest)
+    return _project_payload(state["project_id"], state["root_path"], manifest)
+
+
+def delete_project(project_id: int) -> Dict[str, Any]:
+    row = _catalog_row_for_project(project_id)
+    root_path = Path(row["root_path"]).expanduser().resolve()
+    manifest = _read_json(_manifest_path(root_path), {}) if root_path.exists() else {}
+    origin = manifest.get("origin") if isinstance(manifest, dict) else {}
+    safe_to_remove_tree = (
+        isinstance(origin, dict)
+        and origin.get("kind") == ORIGIN_KIND_HOSTED_CACHE
+        and root_path.exists()
+    )
+
+    if safe_to_remove_tree:
+        shutil.rmtree(root_path, ignore_errors=True)
+
+    with _catalog_connect() as conn:
+        deleted = conn.execute("DELETE FROM projects WHERE id = ?", (project_id,))
+        if deleted.rowcount == 0:
+            raise HTTPException(status_code=404, detail="Project not found")
+
+    return {
+        "status": "deleted",
+        "project_id": project_id,
+        "deleted_files": safe_to_remove_tree,
+    }
 
 
 def get_project(project_id: int) -> Dict[str, Any]:

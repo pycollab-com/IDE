@@ -15,9 +15,9 @@ function makeRunId() {
   return `${Date.now().toString(16)}-${Math.random().toString(16).slice(2)}`;
 }
 
-function resolveRuntimeConfigUrl() {
+function resolveRuntimeConfigUrl(apiBase = API_BASE) {
   const base =
-    API_BASE ||
+    apiBase ||
     (typeof window !== "undefined" ? window.location.origin : "") ||
     (typeof self !== "undefined" ? self.location?.href || "" : "");
   return new URL("/runtime/pyodide-config", base).toString();
@@ -41,8 +41,9 @@ function normalizeText(value, fallback = "") {
 }
 
 export class PyodideRunner {
-  constructor(callbacks = {}) {
+  constructor(callbacks = {}, options = {}) {
     this.callbacks = callbacks;
+    this.runtimeApiBase = options.runtimeApiBase || API_BASE;
     this.worker = null;
     this.workerReady = false;
     this.running = false;
@@ -93,9 +94,9 @@ export class PyodideRunner {
   }
 
   async _fetchRuntimeConfig() {
-    const response = await fetch(resolveRuntimeConfigUrl(), {
+    const response = await fetch(resolveRuntimeConfigUrl(this.runtimeApiBase), {
       method: "GET",
-      credentials: "include",
+      credentials: "omit",
     });
     if (!response.ok) {
       throw new Error(`Runtime config request failed (${response.status}).`);

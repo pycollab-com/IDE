@@ -1,0 +1,45 @@
+.landing-voxel-scene {
+  position: fixed;
+  inset: 0;
+  z-index: 2.4;
+  pointer-events: none;
+  overflow: hidden;
+}
+
+.landing-voxel-scene__canvas,
+.landing-voxel-scene__canvas canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.landing-voxel-scene__scrim {
+  position: absolute;
+  inset: 0;
+  background:
+    radial-gradient(58vw 44vw at 72% 38%, rgba(137, 152, 120, 0.14), transparent 56%),
+    radial-gradient(40vw 36vw at 28% 72%, rgba(127, 142, 109, 0.09), transparent 60%),
+    linear-gradient(180deg, rgba(18, 17, 19, 0) 0%, rgba(18, 17, 19, 0.04) 58%, rgba(18, 17, 19, 0.08) 100%);
+}
+
+[data-theme="light"] .landing-voxel-scene__scrim {
+  background:
+    radial-gradient(58vw 44vw at 72% 38%, rgba(137, 152, 120, 0.12), transparent 56%),
+    radial-gradient(40vw 36vw at 28% 72%, rgba(127, 142, 109, 0.07), transparent 60%),
+    linear-gradient(180deg, rgba(247, 247, 242, 0) 0%, rgba(247, 247, 242, 0.02) 58%, rgba(247, 247, 242, 0.06) 100%);
+}
+
+@media (max-width: 768px) {
+  .landing-voxel-scene__scrim {
+    background:
+      radial-gradient(82vw 58vw at 50% 32%, rgba(137, 152, 120, 0.12), transparent 58%),
+      linear-gradient(180deg, rgba(18, 17, 19, 0) 0%, rgba(18, 17, 19, 0.06) 100%);
+  }
+
+  [data-theme="light"] .landing-voxel-scene__scrim {
+    background:
+      radial-gradient(82vw 58vw at 50% 32%, rgba(137, 152, 120, 0.1), transparent 58%),
+      linear-gradient(180deg, rgba(247, 247, 242, 0) 0%, rgba(247, 247, 242, 0.05) 100%);
+  }
+}

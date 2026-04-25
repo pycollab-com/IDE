@@ -13,7 +13,7 @@ import {
   FiTrash2,
   FiZap,
 } from "react-icons/fi";
-import api from "../api";
+import { localApi } from "../api";
 import TypeModal from "./dashboards/TypeModal";
 import { checkAppUpdate, chooseCreateLocation, chooseImportSource, openAppUpdate } from "../utils/desktopBridge";
 
@@ -49,7 +49,7 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
   const loadRecents = async () => {
     setLoading(true);
     try {
-      const res = await api.get("/ide/recents");
+      const res = await localApi.get("/ide/recents");
       setRecents(Array.isArray(res.data) ? res.data : []);
       setError("");
     } catch (err) {
@@ -96,7 +96,7 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
     loadUpdate();
   }, [desktopContext?.isDesktop, desktopContext?.version]);
 
-  const openProject = (project) => navigate(`/projects/${project.id}`);
+  const openProject = (project) => navigate(`/local/projects/${project.id}`);
 
   const handleOpenProject = async () => {
     const sourcePath = await chooseImportSource();
@@ -104,9 +104,9 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
     const normalizedPath = sourcePath.toLowerCase();
     try {
       const res = normalizedPath.endsWith(".zip") || normalizedPath.endsWith(".py")
-        ? await api.post("/ide/projects/import", { source_path: sourcePath })
-        : await api.post("/ide/projects/open-folder", { folder_path: sourcePath });
-      navigate(`/projects/${res.data.id}`);
+        ? await localApi.post("/ide/projects/import", { source_path: sourcePath })
+        : await localApi.post("/ide/projects/open-folder", { folder_path: sourcePath });
+      navigate(`/local/projects/${res.data.id}`);
     } catch (err) {
       setError(err.response?.data?.detail || "Could not open project.");
     }
@@ -136,12 +136,12 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
     if (!name.trim() || !createLocation) return;
     setCreating(true);
     try {
-      const res = await api.post("/ide/projects/create", {
+      const res = await localApi.post("/ide/projects/create", {
         name: name.trim(),
         project_type: projectType,
         location_path: createLocation,
       });
-      navigate(`/projects/${res.data.id}`);
+      navigate(`/local/projects/${res.data.id}`);
     } catch (err) {
       setError(err.response?.data?.detail || "Could not create project.");
     } finally {
@@ -153,7 +153,7 @@ export default function WelcomePage({ theme, toggleTheme, desktopContext }) {
   const handleRemoveRecent = async (project) => {
     if (!window.confirm(`Remove "${project.name}" from recent projects?`)) return;
     try {
-      await api.delete(`/ide/recents/${project.id}`);
+      await localApi.delete(`/ide/recents/${project.id}`);
       setRecents((prev) => prev.filter((entry) => entry.id !== project.id));
       setError("");
     } catch (err) {

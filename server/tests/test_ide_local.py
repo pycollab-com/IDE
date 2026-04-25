@@ -129,3 +129,86 @@ def test_open_folder_only_indexes_python_files_and_recent_can_be_removed():
         recents_after = client.get("/ide/recents")
         assert recents_after.status_code == 200
         assert recents_after.json() == []
+
+
+def test_cached_hosted_project_can_create_explicit_local_copy():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ["PYCOLLAB_IDE_HOME"] = os.path.join(temp_dir, "ide-home")
+
+        from server.ide_app import app
+
+        client = TestClient(app)
+
+        cached = client.post(
+            "/ide/hosted-cache/hosted-abc",
+            json={
+                "project": {
+                    "id": 42,
+                    "public_id": "hosted-abc",
+                    "name": "Competition Robot",
+                    "project_type": "normal",
+                    "files": [
+                        {"id": 1, "name": "main.py", "content": "print('cached')\n"},
+                        {"id": 2, "name": "lib/helpers.py", "content": "def helper():\n    return 1\n"},
+                    ],
+                }
+            },
+        )
+        assert cached.status_code == 200
+        assert cached.json()["file_count"] == 2
+
+        read_cache = client.get("/ide/hosted-cache/hosted-abc")
+        assert read_cache.status_code == 200
+        assert read_cache.json()["project"]["files"][0]["content"] == "print('cached')\n"
+
+        copied = client.post(
+            "/ide/hosted-cache/hosted-abc/copy",
+            json={"name": "Competition Robot Offline Copy"},
+        )
+        assert copied.status_code == 200
+        local_project = copied.json()
+        assert local_project["name"] == "Competition Robot Offline Copy"
+        assert local_project["origin"]["kind"] == "hosted-cache"
+        assert local_project["origin"]["hostedProjectId"] == "hosted-abc"
+        assert local_project["local_project_kind"] == "offline-copy"
+        assert local_project["is_offline_copy"] is True
+        assert sorted(file["name"] for file in local_project["files"]) == ["lib/helpers.py", "main.py"]
+        assert next(file for file in local_project["files"] if file["name"] == "main.py")["content"] == "print('cached')\n"
+
+        delete_local = client.delete(f"/projects/{local_project['id']}")
+        assert delete_local.status_code == 200
+        assert delete_local.json()["deleted_files"] is True
+
+        project_after_delete = client.get(f"/projects/{local_project['id']}")
+        assert project_after_delete.status_code == 404
+
+
+def test_desktop_google_auth_complete_accepts_form_post():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ["PYCOLLAB_IDE_HOME"] = os.path.join(temp_dir, "ide-home")
+
+        from server.ide_app import app
+
+        client = TestClient(app)
+
+        started = client.post("/ide/auth/google/desktop/start")
+        assert started.status_code == 200
+        payload = started.json()
+        session_id = payload["session_id"]
+        state = payload["state"]
+
+        complete = client.post(
+            f"/ide/auth/google/desktop/{session_id}/complete",
+            data={
+                "state": state,
+                "result": '{"status":"authenticated","payload":{"access_token":"token","user":{"id":1}}}',
+            },
+            headers={"accept": "text/html"},
+        )
+        assert complete.status_code == 200
+        assert "Sign-in complete" in complete.text
+
+        polled = client.get(f"/ide/auth/google/desktop/{session_id}")
+        assert polled.status_code == 200
+        assert polled.json()["status"] == "completed"
+        assert polled.json()["result"]["payload"]["access_token"] == "token"

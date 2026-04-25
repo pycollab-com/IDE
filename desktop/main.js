@@ -1,4 +1,4 @@
-const { app, BrowserWindow, dialog, ipcMain, session, shell } = require("electron");
+const { app, BrowserWindow, clipboard, dialog, ipcMain, safeStorage, session, shell } = require("electron");
 const childProcess = require("child_process");
 const fs = require("fs");
 const net = require("net");
@@ -17,6 +17,68 @@ const RELEASE_OWNER = "pycollab-com";
 const RELEASE_REPO = "IDE";
 const RELEASES_API_URL = `https://api.github.com/repos/${RELEASE_OWNER}/${RELEASE_REPO}/releases/latest`;
 const MAC_BLUETOOTH_SETTINGS_URL = "x-apple.systempreferences:com.apple.preference.security?Privacy_Bluetooth";
+
+function getPersistentStatePath() {
+  return path.join(app.getPath("userData"), "renderer-state.json");
+}
+
+function parsePersistentState(rawValue) {
+  if (!rawValue) {
+    return {};
+  }
+
+  try {
+    const parsed = JSON.parse(rawValue);
+    return parsed && typeof parsed === "object" ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+function decodePersistentState(buffer) {
+  if (!buffer?.length) {
+    return {};
+  }
+
+  if (safeStorage.isEncryptionAvailable()) {
+    try {
+      return parsePersistentState(safeStorage.decryptString(buffer));
+    } catch {
+      // Fall back to plain text for older installs.
+    }
+  }
+
+  return parsePersistentState(buffer.toString("utf8"));
+}
+
+function readPersistentState() {
+  const statePath = getPersistentStatePath();
+  if (!fs.existsSync(statePath)) {
+    return {};
+  }
+
+  try {
+    return decodePersistentState(fs.readFileSync(statePath));
+  } catch (error) {
+    appendLog(`Failed to read persistent state: ${error?.message || error}`);
+    return {};
+  }
+}
+
+function writePersistentState(nextState) {
+  const statePath = getPersistentStatePath();
+  const payload = JSON.stringify(nextState && typeof nextState === "object" ? nextState : {});
+  const encoded = safeStorage.isEncryptionAvailable()
+    ? safeStorage.encryptString(payload)
+    : Buffer.from(payload, "utf8");
+
+  fs.mkdirSync(path.dirname(statePath), { recursive: true });
+  fs.writeFileSync(statePath, encoded);
+}
+
+function removePersistentState() {
+  fs.rmSync(getPersistentStatePath(), { force: true });
+}
 
 function appendLog(message) {
   const line = `[${new Date().toISOString()}] ${message}\n`;
@@ -442,6 +504,7 @@ function registerDevicePermissions() {
 async function createMainWindow() {
   await session.defaultSession.clearCache();
   const serviceUrl = await startLocalService();
+  const rendererUrl = String(process.env.PYCOLLAB_IDE_RENDERER_URL || "").trim();
   registerDevicePermissions();
 
   mainWindow = new BrowserWindow({
@@ -452,6 +515,14 @@ async function createMainWindow() {
     autoHideMenuBar: true,
     backgroundColor: "#121113",
     title: "PyCollab IDE",
+    ...(process.platform === "darwin"
+      ? {
+          titleBarStyle: "hiddenInset",
+          trafficLightPosition: { x: 18, y: 18 },
+          vibrancy: "under-window",
+          visualEffectState: "active",
+        }
+      : {}),
     webPreferences: {
       contextIsolation: true,
       nodeIntegration: false,
@@ -503,8 +574,11 @@ async function createMainWindow() {
     return { action: "deny" };
   });
 
-  appendLog(`Loading renderer URL ${serviceUrl}`);
-  await mainWindow.loadURL(serviceUrl);
+  const loadUrl = rendererUrl
+    ? `${rendererUrl}${rendererUrl.includes("?") ? "&" : "?"}localApiBase=${encodeURIComponent(serviceUrl)}`
+    : serviceUrl;
+  appendLog(`Loading renderer URL ${loadUrl}`);
+  await mainWindow.loadURL(loadUrl);
 }
 
 ipcMain.handle("pycollab:choose-folder", async () => {
@@ -550,6 +624,31 @@ ipcMain.handle("pycollab:get-desktop-context", async () => ({
   version: app.getVersion(),
 }));
 
+ipcMain.handle("pycollab:get-persistent-state", async () => {
+  return readPersistentState();
+});
+
+ipcMain.handle("pycollab:set-persistent-state", async (event, nextState) => {
+  try {
+    const state = nextState && typeof nextState === "object" ? nextState : {};
+    writePersistentState(state);
+    return { ok: true, state };
+  } catch (error) {
+    appendLog(`Failed to write persistent state: ${error?.stack || error}`);
+    return { ok: false, error: error?.message || "Could not store IDE state." };
+  }
+});
+
+ipcMain.handle("pycollab:clear-persistent-state", async () => {
+  try {
+    removePersistentState();
+    return { ok: true };
+  } catch (error) {
+    appendLog(`Failed to clear persistent state: ${error?.stack || error}`);
+    return { ok: false, error: error?.message || "Could not clear IDE state." };
+  }
+});
+
 ipcMain.handle("pycollab:check-app-update", async () => {
   try {
     return {
@@ -572,6 +671,20 @@ ipcMain.handle("pycollab:open-app-update", async (event, targetUrl) => {
     return { ok: false };
   }
   await shell.openExternal(nextUrl);
+  return { ok: true };
+});
+
+ipcMain.handle("pycollab:open-external-url", async (event, targetUrl) => {
+  const nextUrl = String(targetUrl || "").trim();
+  if (!nextUrl || !/^https:\/\//i.test(nextUrl)) {
+    return { ok: false };
+  }
+  await shell.openExternal(nextUrl);
+  return { ok: true };
+});
+
+ipcMain.handle("pycollab:copy-text", async (event, text) => {
+  clipboard.writeText(String(text || ""));
   return { ok: true };
 });
 

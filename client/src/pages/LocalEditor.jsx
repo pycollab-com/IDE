@@ -25,7 +25,7 @@ import {
   FiX,
   FiZap,
 } from "react-icons/fi";
-import api from "../api";
+import { LOCAL_API_BASE, localApi } from "../api";
 import CommandPalette from "../components/CommandPalette";
 import PybricksBlocksEditor from "../pybricks-blocks/ui/PybricksBlocksEditor";
 import { PROJECT_TYPE_PYBRICKS } from "../projects/projectTypes";
@@ -205,9 +205,9 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
   const loadProject = async () => {
     try {
       const [projectRes, tasksRes, snapshotsRes] = await Promise.all([
-        api.get(`/projects/${id}`),
-        api.get(`/projects/${id}/tasks`),
-        api.get(`/projects/${id}/snapshots`),
+        localApi.get(`/projects/${id}`),
+        localApi.get(`/projects/${id}/tasks`),
+        localApi.get(`/projects/${id}/snapshots`),
       ]);
       const nextProject = projectRes.data;
       const nextFiles = nextProject.files || [];
@@ -282,7 +282,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
             onStderr: (chunk) => active && appendOutput(chunk),
             onRunResult: () => active && setAwaitingInput(false),
             onError: (message) => active && setError(String(message || "Runtime failed.")),
-          });
+          }, { runtimeApiBase: LOCAL_API_BASE });
 
     runnerRef.current = runner;
     runner.init().catch(() => {});
@@ -332,7 +332,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
     }
     const timeoutId = window.setTimeout(async () => {
       try {
-        await api.patch(`/projects/${id}/files/${fileId}`, { content });
+        await localApi.patch(`/projects/${id}/files/${fileId}`, { content });
       } catch (err) {
         setError(err.response?.data?.detail || "Failed to save file.");
       } finally {
@@ -349,7 +349,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
     }
     const timeoutId = window.setTimeout(async () => {
       try {
-        await api.patch(`/projects/${id}/block-documents/${documentId}`, { workspace_json: workspaceJson });
+        await localApi.patch(`/projects/${id}/block-documents/${documentId}`, { workspace_json: workspaceJson });
       } catch (err) {
         setError(err.response?.data?.detail || "Failed to save block document.");
       } finally {
@@ -493,7 +493,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
       const name = window.prompt("New block document name", "Blocks");
       if (!name) return;
       try {
-        const res = await api.post(`/projects/${id}/block-documents`, { name });
+        const res = await localApi.post(`/projects/${id}/block-documents`, { name });
         setBlockDocuments((prev) => [...prev, res.data]);
         setCurrentBlockDocumentId(res.data.id);
         setActiveEditorKind("blocks");
@@ -508,7 +508,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
     const name = normalizePythonFileName(rawName);
     if (!name) return;
     try {
-      const res = await api.post(`/projects/${id}/files`, { name, content: "" });
+      const res = await localApi.post(`/projects/${id}/files`, { name, content: "" });
       setFiles((prev) => [...prev, res.data].sort((a, b) => a.name.localeCompare(b.name)));
       setCurrentFileId(res.data.id);
       setActiveEditorKind("file");
@@ -522,7 +522,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
     const nextName = normalizePythonFileName(window.prompt("Rename Python file", file.name));
     if (!nextName || nextName === file.name) return;
     try {
-      const res = await api.patch(`/projects/${id}/files/${file.id}`, { name: nextName });
+      const res = await localApi.patch(`/projects/${id}/files/${file.id}`, { name: nextName });
       setFiles((prev) => prev.map((entry) => (entry.id === file.id ? res.data : entry)).sort((a, b) => a.name.localeCompare(b.name)));
       setError("");
     } catch (err) {
@@ -533,7 +533,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
   const removeFile = async (file) => {
     if (!window.confirm(`Delete ${file.name}?`)) return;
     try {
-      await api.delete(`/projects/${id}/files/${file.id}`);
+      await localApi.delete(`/projects/${id}/files/${file.id}`);
       setFiles((prev) => prev.filter((entry) => entry.id !== file.id));
       if (currentFileId === file.id) {
         const nextFile = files.find((entry) => entry.id !== file.id);
@@ -549,7 +549,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
     const nextName = window.prompt("Rename block document", document.name);
     if (!nextName || nextName === document.name) return;
     try {
-      const res = await api.patch(`/projects/${id}/block-documents/${document.id}`, { name: nextName });
+      const res = await localApi.patch(`/projects/${id}/block-documents/${document.id}`, { name: nextName });
       setBlockDocuments((prev) => prev.map((entry) => (entry.id === document.id ? res.data : entry)));
       setError("");
     } catch (err) {
@@ -560,7 +560,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
   const removeBlockDocument = async (document) => {
     if (!window.confirm(`Delete ${document.name}?`)) return;
     try {
-      await api.delete(`/projects/${id}/block-documents/${document.id}`);
+      await localApi.delete(`/projects/${id}/block-documents/${document.id}`);
       const nextDocuments = blockDocuments.filter((entry) => entry.id !== document.id);
       setBlockDocuments(nextDocuments);
       if (currentBlockDocumentId === document.id) {
@@ -578,7 +578,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
   const addTask = async () => {
     if (!taskDraft.trim()) return;
     try {
-      const res = await api.post(`/projects/${id}/tasks`, { content: taskDraft.trim() });
+      const res = await localApi.post(`/projects/${id}/tasks`, { content: taskDraft.trim() });
       setTasks((prev) => [res.data, ...prev]);
       setTaskDraft("");
       setError("");
@@ -589,7 +589,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
 
   const toggleTask = async (task) => {
     try {
-      const res = await api.patch(`/projects/${id}/tasks/${task.id}`, { is_done: !task.is_done });
+      const res = await localApi.patch(`/projects/${id}/tasks/${task.id}`, { is_done: !task.is_done });
       setTasks((prev) => prev.map((entry) => (entry.id === task.id ? res.data : entry)));
       setError("");
     } catch (err) {
@@ -599,7 +599,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
 
   const toggleTaskOwnership = async (task) => {
     try {
-      const res = await api.patch(`/projects/${id}/tasks/${task.id}`, {
+      const res = await localApi.patch(`/projects/${id}/tasks/${task.id}`, {
         assigned_to_user_id: task.assigned_to_name ? null : 1,
       });
       setTasks((prev) => prev.map((entry) => (entry.id === task.id ? res.data : entry)));
@@ -612,7 +612,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
   const removeTask = async (task) => {
     if (!window.confirm(`Delete task "${task.content}"?`)) return;
     try {
-      await api.delete(`/projects/${id}/tasks/${task.id}`);
+      await localApi.delete(`/projects/${id}/tasks/${task.id}`);
       setTasks((prev) => prev.filter((entry) => entry.id !== task.id));
       setError("");
     } catch (err) {
@@ -622,7 +622,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
 
   const addSnapshot = async () => {
     try {
-      const res = await api.post(`/projects/${id}/snapshots`, { name: snapshotDraft.trim() || undefined });
+      const res = await localApi.post(`/projects/${id}/snapshots`, { name: snapshotDraft.trim() || undefined });
       setSnapshots((prev) => [res.data, ...prev]);
       setSnapshotDraft("");
       setError("");
@@ -634,7 +634,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
   const restoreSnapshot = async (snapshot) => {
     if (!window.confirm(`Restore checkpoint "${snapshot.name}"?`)) return;
     try {
-      await api.post(`/projects/${id}/snapshots/${snapshot.id}/restore`);
+      await localApi.post(`/projects/${id}/snapshots/${snapshot.id}/restore`);
       setOpenSnapshotMenuId(null);
       await loadProject();
     } catch (err) {
@@ -644,7 +644,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
 
   const exportSnapshot = async (snapshot) => {
     try {
-      const res = await api.get(`/projects/${id}/snapshots/${snapshot.id}/export`, {
+      const res = await localApi.get(`/projects/${id}/snapshots/${snapshot.id}/export`, {
         responseType: "blob",
       });
       const url = window.URL.createObjectURL(res.data);
@@ -665,7 +665,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
   const deleteSnapshot = async (snapshot) => {
     if (!window.confirm(`Delete checkpoint "${snapshot.name}"?`)) return;
     try {
-      await api.delete(`/projects/${id}/snapshots/${snapshot.id}`);
+      await localApi.delete(`/projects/${id}/snapshots/${snapshot.id}`);
       setSnapshots((prev) => prev.filter((entry) => entry.id !== snapshot.id));
       setOpenSnapshotMenuId(null);
       setError("");
@@ -762,7 +762,7 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
     <div className="editor-shell local-editor-shell">
       <aside className="editor-sidebar local-editor-sidebar">
         <div className="es-header">
-          <button className="es-back-btn" onClick={() => navigate("/")} title="Return to projects">
+          <button className="es-back-btn" onClick={() => navigate("/")} title="Return to dashboard">
             <FiChevronLeft size={16} />
           </button>
           <div className="es-project-name">{project?.name || "Loading project…"}</div>
