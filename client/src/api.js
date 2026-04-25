@@ -15,6 +15,7 @@ const resolveLocalApiBase = () => {
 };
 
 const LOCAL_API_BASE = normalizeBase(import.meta.env.VITE_LOCAL_API_BASE || resolveLocalApiBase());
+const IS_DESKTOP_RUNTIME = typeof window !== "undefined" && typeof window.pycollabDesktop !== "undefined";
 const HOSTED_WEB_BASE = normalizeBase(
   import.meta.env.VITE_HOSTED_WEB_BASE ||
     import.meta.env.VITE_HOSTED_API_BASE ||
@@ -26,6 +27,8 @@ const HOSTED_API_BASE = normalizeBase(
     import.meta.env.VITE_API_BASE ||
     HOSTED_WEB_BASE
 );
+const DESKTOP_HOSTED_PROXY_BASE =
+  IS_DESKTOP_RUNTIME && LOCAL_API_BASE ? `${LOCAL_API_BASE}/ide/hosted-proxy` : HOSTED_API_BASE;
 
 const API_BASE = HOSTED_API_BASE;
 
@@ -34,7 +37,7 @@ const localApi = axios.create({
 });
 
 const hostedApi = axios.create({
-  baseURL: HOSTED_API_BASE,
+  baseURL: DESKTOP_HOSTED_PROXY_BASE,
 });
 
 hostedApi.interceptors.request.use((config) => {

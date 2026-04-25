@@ -1,6 +1,8 @@
 import os
 import tempfile
+from email.message import Message
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 
@@ -212,3 +214,47 @@ def test_desktop_google_auth_complete_accepts_form_post():
         assert polled.status_code == 200
         assert polled.json()["status"] == "completed"
         assert polled.json()["result"]["payload"]["access_token"] == "token"
+
+
+def test_hosted_proxy_relays_requests_through_local_service():
+    with tempfile.TemporaryDirectory() as temp_dir:
+        os.environ["PYCOLLAB_IDE_HOME"] = os.path.join(temp_dir, "ide-home")
+
+        from server.ide_app import app
+
+        client = TestClient(app)
+        captured = {}
+
+        headers = Message()
+        headers["Content-Type"] = "application/json"
+        headers["Cache-Control"] = "no-store"
+
+        class FakeResponse:
+            def __init__(self):
+                self.status = 200
+                self.headers = headers
+
+            def read(self):
+                return b'{"status":"ok"}'
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, tb):
+                return False
+
+        def fake_urlopen(request, timeout=0, context=None):
+            captured["url"] = request.full_url
+            captured["authorization"] = request.headers.get("Authorization")
+            return FakeResponse()
+
+        with patch("server.ide_app.urlopen", side_effect=fake_urlopen):
+            proxied = client.get(
+                "/ide/hosted-proxy/health?probe=1",
+                headers={"Authorization": "Bearer desktop-token"},
+            )
+
+        assert proxied.status_code == 200
+        assert proxied.json() == {"status": "ok"}
+        assert captured["url"].endswith("/health?probe=1")
+        assert captured["authorization"] == "Bearer desktop-token"

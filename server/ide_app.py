@@ -24,6 +24,7 @@ INDEX_FILE = FRONTEND_DIST / "index.html"
 DEFAULT_PYODIDE_VERSION = "0.29.3"
 DEFAULT_PYODIDE_BASE_URL = f"/vendor/pyodide/v{DEFAULT_PYODIDE_VERSION}/full/"
 DESKTOP_GOOGLE_AUTH_TTL_SECONDS = 600
+HOSTED_API_BASE = (os.environ.get("PYCOLLAB_HOSTED_API_BASE") or os.environ.get("PYCOLLAB_HOSTED_WEB_BASE") or "https://pycollab.com").rstrip("/")
 desktop_google_auth_sessions: Dict[str, Dict[str, Any]] = {}
 
 app = FastAPI(
@@ -158,6 +159,59 @@ def ide_asset_proxy(asset_url: str):
         raise HTTPException(status_code=error.code, detail="Hosted asset request failed") from error
     except URLError as error:
         raise HTTPException(status_code=502, detail="Hosted asset could not be fetched") from error
+
+
+@app.api_route("/ide/hosted-proxy/{target_path:path}", methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"])
+async def ide_hosted_proxy(target_path: str, request: Request):
+    target = f"{HOSTED_API_BASE}/{target_path.lstrip('/')}"
+    if request.url.query:
+        target = f"{target}?{request.url.query}"
+
+    forwarded_headers = {
+        "User-Agent": "PyCollab IDE",
+        "Accept": request.headers.get("accept", "application/json, text/plain, */*"),
+    }
+
+    for header_name in ("authorization", "content-type", "if-match", "if-none-match", "accept-language"):
+        header_value = request.headers.get(header_name)
+        if header_value:
+            forwarded_headers[header_name] = header_value
+
+    request_body = await request.body()
+    upstream_request = UrlRequest(
+        target,
+        data=request_body or None,
+        headers=forwarded_headers,
+        method=request.method,
+    )
+
+    try:
+        with urlopen(upstream_request, timeout=15, context=ssl._create_unverified_context()) as upstream:
+            response_headers = {}
+            for header_name in ("Cache-Control", "Content-Disposition", "ETag", "Last-Modified", "Location"):
+                header_value = upstream.headers.get(header_name)
+                if header_value:
+                    response_headers[header_name] = header_value
+            return Response(
+                content=upstream.read(),
+                status_code=getattr(upstream, "status", 200),
+                media_type=upstream.headers.get_content_type() or "application/octet-stream",
+                headers=response_headers,
+            )
+    except HTTPError as error:
+        response_headers = {}
+        for header_name in ("Cache-Control", "Content-Disposition", "ETag", "Last-Modified", "Location"):
+            header_value = error.headers.get(header_name)
+            if header_value:
+                response_headers[header_name] = header_value
+        return Response(
+            content=error.read(),
+            status_code=error.code,
+            media_type=error.headers.get_content_type() or "application/json",
+            headers=response_headers,
+        )
+    except URLError as error:
+        raise HTTPException(status_code=502, detail="Hosted service unavailable") from error
 
 
 def _cleanup_desktop_google_auth_sessions() -> None:
