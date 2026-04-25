@@ -114,6 +114,42 @@ function compareVersions(left, right) {
   return 0;
 }
 
+function readBundledPackageVersion() {
+  const candidatePaths = [
+    path.join(__dirname, "package.json"),
+    path.join(process.resourcesPath || "", "app", "package.json"),
+  ];
+
+  for (const candidate of candidatePaths) {
+    if (!candidate || !fs.existsSync(candidate)) {
+      continue;
+    }
+
+    try {
+      const parsed = JSON.parse(fs.readFileSync(candidate, "utf8"));
+      const version = normalizeVersion(parsed?.version);
+      if (version) {
+        return version;
+      }
+    } catch (error) {
+      appendLog(`Failed to read bundled package version from ${candidate}: ${error?.message || error}`);
+    }
+  }
+
+  return "";
+}
+
+function getReportedAppVersion() {
+  const bundleVersion = normalizeVersion(app.getVersion());
+  const packagedVersion = readBundledPackageVersion();
+
+  if (packagedVersion && compareVersions(packagedVersion, bundleVersion) > 0) {
+    return packagedVersion;
+  }
+
+  return bundleVersion || packagedVersion || "0.0.0";
+}
+
 function chooseReleaseAsset(assets) {
   const candidates = Array.isArray(assets) ? assets.filter((asset) => asset?.browser_download_url) : [];
 
@@ -150,7 +186,7 @@ async function fetchLatestReleaseInfo() {
   }
 
   const release = await response.json();
-  const currentVersion = normalizeVersion(app.getVersion());
+  const currentVersion = getReportedAppVersion();
   const latestVersion = normalizeVersion(release.tag_name || release.name || "");
 
   if (!latestVersion) {
@@ -621,7 +657,7 @@ ipcMain.handle("pycollab:reveal-path", async (event, targetPath) => {
 ipcMain.handle("pycollab:get-desktop-context", async () => ({
   isDesktop: true,
   platform: process.platform,
-  version: app.getVersion(),
+  version: getReportedAppVersion(),
 }));
 
 ipcMain.handle("pycollab:get-persistent-state", async () => {
@@ -660,7 +696,7 @@ ipcMain.handle("pycollab:check-app-update", async () => {
     return {
       ok: false,
       error: error?.message || "Could not check for updates.",
-      current_version: normalizeVersion(app.getVersion()),
+      current_version: getReportedAppVersion(),
     };
   }
 });
