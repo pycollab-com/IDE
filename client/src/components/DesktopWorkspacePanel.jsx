@@ -60,6 +60,11 @@ export default function DesktopWorkspacePanel({ desktopContext }) {
   const updateAvailable = Boolean(updateInfo?.update_available);
   const releaseDate = formatReleaseDate(updateInfo?.published_at);
   const updateTargetUrl = updateInfo?.download_url || updateInfo?.release_url || "";
+  const showUpdatePanel = Boolean(updateState.error || updateAvailable);
+
+  if (!showUpdatePanel) {
+    return null;
+  }
 
   return (
     <section className="ide-dashboard-stack" aria-label="App update">
