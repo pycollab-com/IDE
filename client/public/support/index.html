@@ -1,0 +1,841 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>PyCollab — Support</title>
+  <meta name="description" content="PyCollab Support Center — contact options, live status, and troubleshooting." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <style>
+    /* ── Design tokens matching the landing page ── */
+    :root {
+      --primary: rgb(137,152,120);
+      --secondary: rgb(127,142,109);
+      --accent: rgb(156,170,136);
+      --p-rgb: 137,152,120;
+      --s-rgb: 127,142,109;
+      --a-rgb: 156,170,136;
+
+      --bg: #0c0c0e;
+      --card: rgba(18,17,19,0.78);
+      --border: rgba(247,247,242,0.13);
+      --text: #f7f7f2;
+      --text-soft: rgba(247,247,242,0.65);
+      --text-muted: rgba(247,247,242,0.42);
+
+      --font: 'Space Grotesk', ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif;
+      --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+      --max: min(1160px, calc(100% - 64px));
+      --radius: 20px;
+      --radius-sm: 12px;
+    }
+
+    [data-theme="light"] {
+      --bg: #f7f7f2;
+      --card: rgba(255,255,255,0.94);
+      --border: rgba(18,17,19,0.1);
+      --text: #121113;
+      --text-soft: rgba(18,17,19,0.72);
+      --text-muted: rgba(18,17,19,0.45);
+    }
+
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      margin: 0; padding: 0;
+      font-family: var(--font);
+      font-size: 16px;
+      background: var(--bg);
+      color: var(--text);
+      -webkit-font-smoothing: antialiased;
+      -moz-osx-font-smoothing: grayscale;
+      overflow-x: hidden;
+    }
+
+    /* Grid background matching Landing.jsx animated-bg */
+    .sp-grid {
+      position: fixed; inset: 0; pointer-events: none; z-index: 0;
+      background-image:
+        linear-gradient(to right, rgba(247,247,242,0.04) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(247,247,242,0.04) 1px, transparent 1px);
+      background-size: 64px 64px;
+      mask-image: radial-gradient(70% 50% at 50% 15%, black 55%, transparent 100%);
+    }
+    [data-theme="light"] .sp-grid {
+      background-image:
+        linear-gradient(to right, rgba(18,17,19,0.06) 1px, transparent 1px),
+        linear-gradient(to bottom, rgba(18,17,19,0.06) 1px, transparent 1px);
+    }
+
+    /* Glow blobs matching Landing's Atmosphere */
+    .sp-glow {
+      position: fixed; pointer-events: none; z-index: 0; border-radius: 50%;
+    }
+    .sp-glow-1 {
+      width: 900px; height: 900px;
+      top: -380px; left: 50%; transform: translateX(-50%);
+      background: radial-gradient(circle, rgba(var(--p-rgb),0.22), transparent 65%);
+    }
+    .sp-glow-2 {
+      width: 600px; height: 600px;
+      bottom: 10%; right: -200px;
+      background: radial-gradient(circle, rgba(var(--s-rgb),0.14), transparent 65%);
+    }
+
+    /* Spotlight */
+    .sp-spot {
+      position: fixed; inset: 0; pointer-events: none; z-index: 1;
+      background: radial-gradient(380px circle at var(--mx,50%) var(--my,50%),
+        rgba(var(--p-rgb),0.18), transparent 70%);
+      mix-blend-mode: screen;
+    }
+    [data-theme="light"] .sp-spot { mix-blend-mode: normal; opacity: 0.7; }
+
+    /* ── Navigation ── */
+    .nav {
+      position: sticky; top: 0; z-index: 50;
+      backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+      background: rgba(12,12,14,0.72);
+      border-bottom: 1px solid var(--border);
+    }
+    [data-theme="light"] .nav { background: rgba(247,247,242,0.88); }
+
+    .nav-inner {
+      max-width: var(--max); margin: 0 auto;
+      padding: 14px 0;
+      display: flex; align-items: center; justify-content: space-between; gap: 16px;
+    }
+
+    .nav-logo {
+      font-size: 1.15rem; font-weight: 800; letter-spacing: -0.03em;
+      background: linear-gradient(120deg, var(--accent), var(--primary), var(--secondary));
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+      text-decoration: none; white-space: nowrap;
+    }
+
+    .nav-tag {
+      font-size: 0.72rem; letter-spacing: 0.16em; text-transform: uppercase;
+      color: var(--text-muted); font-weight: 600; margin-left: -4px;
+    }
+
+    .nav-links { display: flex; gap: 4px; }
+
+    .nav-link {
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 7px 14px; border-radius: 999px;
+      color: var(--text-soft); font-size: 0.9rem; font-weight: 500;
+      text-decoration: none;
+      border: 1px solid transparent;
+      transition: color 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+    }
+    .nav-link:hover {
+      color: var(--text);
+      background: rgba(var(--p-rgb),0.12);
+      border-color: rgba(var(--p-rgb),0.28);
+    }
+
+    .nav-actions { display: flex; gap: 10px; align-items: center; }
+
+    .btn-ghost-nav {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 9px 18px; border-radius: 999px;
+      border: 1px solid var(--border); background: transparent;
+      color: var(--text-soft); font-size: 0.88rem; font-weight: 600;
+      text-decoration: none; cursor: pointer;
+      transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+    }
+    .btn-ghost-nav:hover {
+      color: var(--text); border-color: rgba(var(--p-rgb),0.5);
+      background: rgba(var(--p-rgb),0.1);
+    }
+
+    .btn-primary-nav {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 9px 20px; border-radius: 999px;
+      background: linear-gradient(135deg, var(--accent), var(--primary), var(--secondary));
+      color: #fff; font-size: 0.88rem; font-weight: 700; border: none;
+      text-decoration: none; cursor: pointer;
+      box-shadow: 0 4px 18px rgba(var(--p-rgb),0.42);
+      transition: box-shadow 0.22s ease, transform 0.18s ease;
+    }
+    .btn-primary-nav:hover { box-shadow: 0 6px 28px rgba(var(--p-rgb),0.58); transform: translateY(-1px); }
+
+    /* Theme toggle */
+    .theme-toggle {
+      width: 38px; height: 38px;
+      display: inline-flex; align-items: center; justify-content: center;
+      border-radius: 999px; border: 1px solid var(--border);
+      background: transparent; color: var(--text);
+      cursor: pointer; transition: background 0.18s ease;
+      padding: 0;
+    }
+    .theme-toggle:hover { background: rgba(var(--p-rgb),0.14); }
+    .theme-toggle svg { width: 17px; height: 17px; display: block; }
+
+    /* ── Page shell ── */
+    .page {
+      position: relative; z-index: 2;
+      max-width: var(--max); margin: 0 auto;
+      padding: 56px 0 96px;
+      display: grid; gap: 28px;
+    }
+
+    /* ── Hero ── */
+    .hero {
+      display: grid; grid-template-columns: 1.35fr 0.65fr;
+      gap: 20px; align-items: stretch;
+    }
+
+    .hero-left {
+      padding: 40px 44px;
+      border-radius: var(--radius);
+      background: var(--card);
+      border: 1px solid var(--border);
+      box-shadow: 0 24px 64px rgba(0,0,0,0.42), 0 0 0 1px rgba(var(--p-rgb),0.08);
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      position: relative; overflow: hidden;
+    }
+    .hero-left::before {
+      content: ""; position: absolute;
+      top: -100px; right: -100px; width: 400px; height: 400px; border-radius: 50%;
+      background: radial-gradient(circle, rgba(var(--a-rgb),0.22), transparent 65%);
+      pointer-events: none;
+    }
+    [data-theme="light"] .hero-left {
+      box-shadow: 0 16px 40px rgba(18,17,19,0.1), 0 0 0 1px rgba(var(--p-rgb),0.1);
+    }
+
+    .kicker {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 5px 13px; border-radius: 999px;
+      font-size: 0.68rem; letter-spacing: 0.14em; text-transform: uppercase;
+      font-family: var(--mono);
+      background: rgba(var(--p-rgb),0.2); color: var(--primary);
+      border: 1px solid rgba(var(--p-rgb),0.38);
+    }
+    [data-theme="light"] .kicker { background: rgba(var(--p-rgb),0.12); color: rgb(74,88,58); }
+
+    .hero-title {
+      margin: 16px 0 10px;
+      font-size: clamp(2.8rem,5vw,4rem);
+      font-weight: 800; letter-spacing: -0.04em; line-height: 1.04;
+      position: relative; z-index: 1;
+    }
+
+    .text-gradient {
+      background: linear-gradient(120deg, var(--accent), var(--primary), var(--secondary));
+      -webkit-background-clip: text; background-clip: text; color: transparent;
+    }
+
+    .hero-sub {
+      margin: 0; color: var(--text-soft); font-size: 1.05rem; line-height: 1.6;
+      max-width: 52ch; position: relative; z-index: 1;
+    }
+
+    .hero-actions {
+      margin-top: 28px; display: flex; gap: 12px; flex-wrap: wrap;
+      position: relative; z-index: 1;
+    }
+
+    .btn-primary {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 12px 22px; border-radius: 999px;
+      background: linear-gradient(135deg, var(--accent), var(--primary), var(--secondary));
+      color: #fff; font-size: 0.92rem; font-weight: 700; border: none;
+      text-decoration: none; cursor: pointer;
+      box-shadow: 0 4px 18px rgba(var(--p-rgb),0.42);
+      transition: box-shadow 0.22s ease, transform 0.18s ease;
+    }
+    .btn-primary:hover { box-shadow: 0 6px 28px rgba(var(--p-rgb),0.58); transform: translateY(-1px); }
+
+    .btn-ghost {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 11px 22px; border-radius: 999px;
+      border: 1px solid var(--border); background: transparent;
+      color: var(--text); font-size: 0.92rem; font-weight: 600;
+      text-decoration: none; cursor: pointer;
+      transition: color 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+    }
+    .btn-ghost:hover {
+      border-color: rgba(var(--p-rgb),0.5); background: rgba(var(--p-rgb),0.1);
+    }
+
+    /* Hero right side: quick info cards */
+    .hero-right {
+      display: flex; flex-direction: column; gap: 16px;
+    }
+
+    .info-card {
+      flex: 1;
+      padding: 24px 26px;
+      border-radius: var(--radius);
+      background: var(--card);
+      border: 1px solid var(--border);
+      box-shadow: 0 10px 28px rgba(0,0,0,0.28);
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      display: flex; flex-direction: column; gap: 10px;
+    }
+    [data-theme="light"] .info-card { box-shadow: 0 8px 20px rgba(18,17,19,0.09); }
+
+    .info-card-label {
+      font-size: 0.7rem; letter-spacing: 0.14em; text-transform: uppercase;
+      font-family: var(--mono); color: var(--text-muted); font-weight: 600;
+    }
+
+    .info-card-value {
+      font-size: 1.1rem; font-weight: 700; letter-spacing: -0.02em;
+    }
+
+    .status-pill {
+      display: inline-flex; align-items: center; gap: 8px;
+      padding: 6px 14px; border-radius: 999px;
+      border: 1px solid rgba(var(--p-rgb),0.4);
+      background: rgba(var(--p-rgb),0.15);
+      font-size: 0.82rem; font-weight: 600; color: var(--primary);
+      width: fit-content;
+    }
+    .status-dot {
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--primary);
+      animation: pulse 2s ease-in-out infinite; flex: 0 0 auto;
+    }
+    @keyframes pulse {
+      0%,100% { transform: scale(1); opacity: 1; }
+      50% { transform: scale(1.15); opacity: 0.7; }
+    }
+
+    .info-card-sub {
+      margin: 0; font-size: 0.85rem; color: var(--text-soft); line-height: 1.5;
+    }
+
+    .email-link {
+      display: inline-flex; align-items: center; gap: 10px;
+      padding: 10px 14px; border-radius: var(--radius-sm);
+      border: 1px solid rgba(var(--p-rgb),0.32);
+      background: rgba(var(--p-rgb),0.1);
+      color: var(--text); text-decoration: none;
+      font-family: var(--mono); font-size: 0.82rem;
+      transition: background 0.18s ease, border-color 0.18s ease;
+      width: fit-content;
+    }
+    .email-link:hover { background: rgba(var(--p-rgb),0.18); border-color: rgba(var(--p-rgb),0.5); }
+
+    /* ── Section header ── */
+    .section-head {
+      display: flex; align-items: flex-end; justify-content: space-between;
+      gap: 16px; flex-wrap: wrap;
+      margin-bottom: 16px;
+    }
+    .section-head h2 {
+      margin: 0; font-size: clamp(1.4rem,2.5vw,1.9rem);
+      font-weight: 800; letter-spacing: -0.025em; line-height: 1.1;
+    }
+    .section-head p {
+      margin: 0; color: var(--text-soft); font-size: 0.9rem;
+    }
+
+    /* ── Contact + Status grid ── */
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+
+    .card {
+      padding: 28px 30px; border-radius: var(--radius);
+      background: var(--card); border: 1px solid var(--border);
+      box-shadow: 0 10px 28px rgba(0,0,0,0.24);
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      display: flex; flex-direction: column; gap: 14px;
+    }
+    [data-theme="light"] .card { box-shadow: 0 8px 20px rgba(18,17,19,0.09); }
+
+    .card-kicker {
+      display: inline-flex; align-items: center; gap: 7px;
+      padding: 4px 11px; border-radius: 999px;
+      font-size: 0.66rem; letter-spacing: 0.12em; text-transform: uppercase;
+      font-family: var(--mono);
+      background: rgba(var(--p-rgb),0.15); color: var(--primary);
+      border: 1px solid rgba(var(--p-rgb),0.32);
+      width: fit-content;
+    }
+    [data-theme="light"] .card-kicker { color: rgb(74,88,58); }
+
+    .card h3 {
+      margin: 0; font-size: 1.25rem; font-weight: 700; letter-spacing: -0.02em;
+    }
+    .card p {
+      margin: 0; color: var(--text-soft); font-size: 0.93rem; line-height: 1.6;
+    }
+
+    .check-list {
+      margin: 4px 0 0; padding-left: 18px;
+      display: grid; gap: 8px;
+      color: var(--text-soft); font-size: 0.9rem; line-height: 1.5;
+    }
+
+    .kbd {
+      display: inline-block;
+      font-family: var(--mono); font-size: 0.77rem;
+      padding: 3px 8px; border-radius: 8px;
+      border: 1px solid var(--border); background: rgba(var(--p-rgb),0.1);
+      color: var(--text-soft);
+    }
+
+    /* ── Accordion ── */
+    .accordion { display: grid; gap: 12px; }
+
+    .acc-item {
+      border-radius: var(--radius);
+      background: var(--card); border: 1px solid var(--border);
+      box-shadow: 0 8px 20px rgba(0,0,0,0.2);
+      backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px);
+      overflow: hidden;
+    }
+    [data-theme="light"] .acc-item { box-shadow: 0 6px 14px rgba(18,17,19,0.08); }
+
+    .acc-btn {
+      width: 100%; display: flex; align-items: center;
+      justify-content: space-between; gap: 12px;
+      padding: 18px 22px; border: 0;
+      background: transparent; color: var(--text); cursor: pointer; text-align: left;
+      transition: background 0.18s ease;
+    }
+    .acc-btn:hover { background: rgba(var(--p-rgb),0.07); }
+
+    .acc-left { display: flex; flex-direction: column; gap: 4px; }
+    .acc-title { font-weight: 700; letter-spacing: -0.01em; font-size: 0.97rem; }
+    .acc-sub { font-size: 0.82rem; color: var(--text-soft); }
+
+    .chev {
+      width: 32px; height: 32px; border-radius: 10px;
+      border: 1px solid var(--border); background: rgba(var(--p-rgb),0.1);
+      display: grid; place-items: center; flex: 0 0 auto;
+      transition: transform 0.22s ease, border-color 0.18s ease, background 0.18s ease;
+      color: var(--primary); font-size: 0.9rem;
+    }
+    .acc-btn:hover .chev { border-color: rgba(var(--p-rgb),0.5); background: rgba(var(--p-rgb),0.18); }
+
+    .acc-panel { max-height: 0; overflow: hidden; transition: max-height 0.24s ease; }
+    .acc-panel-inner {
+      padding: 0 22px 18px; color: var(--text-soft); font-size: 0.9rem; line-height: 1.65;
+    }
+    .acc-panel-inner ul { margin: 8px 0 0; padding-left: 18px; display: grid; gap: 8px; }
+
+    .acc-item[data-open="true"] .acc-panel { max-height: 540px; }
+    .acc-item[data-open="true"] .chev { transform: rotate(180deg); }
+    .acc-item[data-open="true"] .acc-btn { background: rgba(var(--p-rgb),0.07); }
+
+    /* ── Diagnostics strip ── */
+    .diag-strip {
+      display: flex; align-items: center; justify-content: space-between; gap: 20px;
+      flex-wrap: wrap;
+      padding: 28px 32px; border-radius: var(--radius);
+      background: var(--card); border: 1px solid rgba(var(--p-rgb),0.28);
+      box-shadow: 0 10px 28px rgba(0,0,0,0.22);
+      backdrop-filter: blur(20px); -webkit-backdrop-filter: blur(20px);
+      position: relative; overflow: hidden;
+    }
+    .diag-strip::before {
+      content: ""; position: absolute;
+      top: -80px; left: -80px; width: 360px; height: 240px; border-radius: 50%;
+      background: radial-gradient(circle, rgba(var(--p-rgb),0.2), transparent 65%);
+      pointer-events: none;
+    }
+    .diag-copy { position: relative; z-index: 1; }
+    .diag-copy h3 {
+      margin: 0 0 6px; font-size: 1.05rem; font-weight: 700; letter-spacing: -0.02em;
+    }
+    .diag-copy p { margin: 0; font-size: 0.88rem; color: var(--text-soft); line-height: 1.55; max-width: 56ch; }
+    .subtle-link { color: var(--primary); text-decoration: none; border-bottom: 1px solid rgba(var(--p-rgb),0.3); padding-bottom: 1px; }
+    .subtle-link:hover { border-bottom-color: rgba(var(--p-rgb),0.7); }
+
+    /* ── Footer ── */
+    footer {
+      position: relative; z-index: 2;
+      max-width: var(--max); margin: 0 auto;
+      padding: 18px 0 36px;
+      display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap;
+      border-top: 1px solid var(--border);
+      color: var(--text-muted); font-size: 0.82rem;
+    }
+    .footer-links { display: flex; gap: 18px; flex-wrap: wrap; }
+    .footer-links a { color: var(--text-soft); text-decoration: none; transition: color 0.18s ease; }
+    .footer-links a:hover { color: var(--primary); }
+
+    /* ── Toast ── */
+    .toast {
+      position: fixed; left: 50%; bottom: 22px; transform: translateX(-50%);
+      padding: 10px 18px; border-radius: 999px;
+      border: 1px solid rgba(var(--p-rgb),0.4);
+      background: rgba(18,17,19,0.88); color: #f7f7f2;
+      backdrop-filter: blur(14px);
+      box-shadow: 0 14px 36px rgba(0,0,0,0.5);
+      opacity: 0; pointer-events: none; z-index: 100;
+      font-size: 0.88rem; font-weight: 600;
+      transition: opacity 0.18s ease, transform 0.18s ease;
+    }
+    [data-theme="light"] .toast { background: rgba(255,255,255,0.92); color: #121113; box-shadow: 0 12px 28px rgba(18,17,19,0.14); }
+    .toast.show { opacity: 1; transform: translateX(-50%) translateY(-4px); }
+
+    /* ── Responsive ── */
+    @media (max-width: 980px) {
+      .hero { grid-template-columns: 1fr; }
+      .hero-right { flex-direction: row; }
+      .info-card { flex: 1 1 0; }
+      .two-col { grid-template-columns: 1fr; }
+    }
+    @media (max-width: 700px) {
+      :root { --max: calc(100% - 32px); }
+      .hero-left { padding: 28px 24px; }
+      .hero-right { flex-direction: column; }
+      .nav-links { display: none; }
+      .page { padding: 36px 0 60px; }
+    }
+    @media (max-width: 480px) {
+      .hero-title { font-size: 2.4rem; }
+      .card { padding: 22px 20px; }
+      .diag-strip { padding: 22px 20px; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      *, *::before, *::after { transition: none !important; animation: none !important; }
+    }
+  </style>
+</head>
+<body>
+  <!-- Background layers -->
+  <div class="sp-grid" aria-hidden="true"></div>
+  <div class="sp-glow sp-glow-1" aria-hidden="true"></div>
+  <div class="sp-glow sp-glow-2" aria-hidden="true"></div>
+  <div class="sp-spot" aria-hidden="true"></div>
+
+  <!-- Navigation -->
+  <header class="nav">
+    <div class="nav-inner">
+      <div style="display:flex;align-items:baseline;gap:10px;">
+        <a class="nav-logo" href="/welcome">PyCollab</a>
+        <span class="nav-tag">Support</span>
+      </div>
+
+      <nav class="nav-links" aria-label="Support sections">
+        <a class="nav-link" href="#contact">Contact</a>
+        <a class="nav-link" href="#status">Status</a>
+        <a class="nav-link" href="#troubleshooting">Troubleshooting</a>
+        <a class="nav-link" href="#diagnostics">Diagnostics</a>
+      </nav>
+
+      <div class="nav-actions">
+        <button class="theme-toggle" id="themeBtn" type="button" aria-label="Toggle theme" title="Toggle theme">
+          <span id="themeIcon" aria-hidden="true"></span>
+        </button>
+        <a class="btn-ghost-nav" href="/welcome"><span aria-hidden="true">←</span> Back</a>
+        <a class="btn-primary-nav" href="mailto:support@pycollab.com?subject=PyCollab%20Support%20Request">Email support</a>
+      </div>
+    </div>
+  </header>
+
+  <!-- Page content -->
+  <main>
+    <div class="page">
+
+      <!-- Hero -->
+      <section class="hero" aria-label="Support overview">
+        <div class="hero-left">
+          <span class="kicker">Support center</span>
+          <h1 class="hero-title">
+            We're here<br />
+            <span class="text-gradient">to help.</span>
+          </h1>
+          <p class="hero-sub">Find contact options, check live platform status, and troubleshoot common issues — all in one place.</p>
+          <div class="hero-actions">
+            <a class="btn-primary" href="mailto:support@pycollab.com?subject=PyCollab%20Support%20Request" aria-label="Email support">
+              <span aria-hidden="true">✉</span> Email support
+            </a>
+            <a class="btn-ghost" href="https://uptime.techtime.coffee/status/pycollab" target="_blank" rel="noreferrer">
+              <span aria-hidden="true">◉</span> View status
+            </a>
+            <a class="btn-ghost" href="#troubleshooting"><span aria-hidden="true">⚙</span> Troubleshooting</a>
+          </div>
+        </div>
+
+        <aside class="hero-right" aria-label="Quick info">
+          <div class="info-card">
+            <div class="info-card-label">Support email</div>
+            <a class="email-link" href="mailto:support@pycollab.com">
+              <span>✉</span>
+              <span>support@pycollab.com</span>
+            </a>
+            <p class="info-card-sub">Typical response within 24 hours. Include browser, OS, and steps to reproduce.</p>
+          </div>
+          <div class="info-card">
+            <div class="info-card-label">Platform status</div>
+            <div class="status-pill">
+              <span class="status-dot"></span>
+              <span>Live</span>
+            </div>
+            <p class="info-card-sub">Check current incidents and uptime on the public status page.</p>
+            <a class="btn-ghost" style="font-size:0.82rem;padding:8px 16px;" href="https://uptime.techtime.coffee/status/pycollab" target="_blank" rel="noreferrer">Open status page →</a>
+          </div>
+        </aside>
+      </section>
+
+      <!-- Contact + Status cards -->
+      <section class="two-col" id="contact" aria-label="Contact and status">
+        <article class="card">
+          <span class="card-kicker">Contact</span>
+          <h3>Get in touch</h3>
+          <p>Email us with as much detail as possible and we'll get back to you fast.</p>
+          <a class="email-link" href="mailto:support@pycollab.com?subject=PyCollab%20Support%20Request">
+            <span>✉</span>
+            <code style="font-family:var(--mono);font-size:0.82rem;">support@pycollab.com</code>
+          </a>
+          <p style="font-size:0.88rem;color:var(--text-soft);margin:0;">Please include:</p>
+          <ul class="check-list">
+            <li>What you were doing</li>
+            <li>What you expected vs. what happened</li>
+            <li>Steps to reproduce</li>
+            <li>Browser + operating system</li>
+            <li>Screenshot or console error (if any)</li>
+          </ul>
+        </article>
+
+        <article class="card" id="status">
+          <span class="card-kicker">Uptime &amp; status</span>
+          <h3>Platform availability</h3>
+          <p>Live availability metrics and incident updates. If something feels off, check here first.</p>
+          <div style="display:flex;align-items:center;gap:12px;flex-wrap:wrap;">
+            <a class="btn-primary" style="font-size:0.88rem;" href="https://uptime.techtime.coffee/status/pycollab" target="_blank" rel="noreferrer">
+              View status page
+            </a>
+            <div class="status-pill">
+              <span class="status-dot"></span>
+              <span>All systems operational</span>
+            </div>
+          </div>
+          <p style="font-size:0.85rem;color:var(--text-soft);margin:0;">
+            Reporting an outage? Include roughly when it started and your region when emailing support.
+          </p>
+        </article>
+      </section>
+
+      <!-- Troubleshooting accordion -->
+      <section aria-label="Troubleshooting" id="troubleshooting">
+        <div class="section-head">
+          <div>
+            <h2>Quick troubleshooting</h2>
+            <p>Common fixes before you email support.</p>
+          </div>
+        </div>
+        <div class="accordion" role="list">
+
+          <div class="acc-item" data-open="true" role="listitem">
+            <button class="acc-btn" type="button" aria-expanded="true">
+              <div class="acc-left">
+                <div class="acc-title">Real-time edits not showing</div>
+                <div class="acc-sub">Presence looks right, but changes don't sync.</div>
+              </div>
+              <div class="chev" aria-hidden="true">▾</div>
+            </button>
+            <div class="acc-panel" role="region">
+              <div class="acc-panel-inner">
+                <ul>
+                  <li>Refresh both clients</li>
+                  <li>Confirm both are in the same project / session</li>
+                  <li>Check if a browser tab was backgrounded for a long time</li>
+                  <li>Try a different network if available</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <div class="acc-item" data-open="false" role="listitem">
+            <button class="acc-btn" type="button" aria-expanded="false">
+              <div class="acc-left">
+                <div class="acc-title">Code won't run</div>
+                <div class="acc-sub">Run button does nothing, or output never appears.</div>
+              </div>
+              <div class="chev" aria-hidden="true">▾</div>
+            </button>
+            <div class="acc-panel" role="region">
+              <div class="acc-panel-inner">
+                <ul>
+                  <li>Reload the page and try again</li>
+                  <li>Try a minimal test: <span class="kbd">print("hello")</span></li>
+                  <li>Confirm the file has a <span class="kbd">.py</span> extension</li>
+                  <li>If it times out, mention runtime limits when you email support</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <div class="acc-item" data-open="false" role="listitem">
+            <button class="acc-btn" type="button" aria-expanded="false">
+              <div class="acc-left">
+                <div class="acc-title">Login or sign-up issues</div>
+                <div class="acc-sub">Can't sign in, session loops, or auth fails.</div>
+              </div>
+              <div class="chev" aria-hidden="true">▾</div>
+            </button>
+            <div class="acc-panel" role="region">
+              <div class="acc-panel-inner">
+                <ul>
+                  <li>Check Caps Lock is off</li>
+                  <li>Try a private / incognito window</li>
+                  <li>Clear site cookies for pycollab.com and retry</li>
+                  <li>Try a different browser or disable extensions</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+          <div class="acc-item" data-open="false" role="listitem">
+            <button class="acc-btn" type="button" aria-expanded="false">
+              <div class="acc-left">
+                <div class="acc-title">Collaborator can't join my room</div>
+                <div class="acc-sub">Invite link doesn't work or access is denied.</div>
+              </div>
+              <div class="chev" aria-hidden="true">▾</div>
+            </button>
+            <div class="acc-panel" role="region">
+              <div class="acc-panel-inner">
+                <ul>
+                  <li>Confirm the link hasn't expired — regenerate it if needed</li>
+                  <li>Check that the room access level allows the invitee</li>
+                  <li>Make sure the collaborator has a PyCollab account</li>
+                  <li>Try sharing the link in a fresh message (no link-preview stripping)</li>
+                </ul>
+              </div>
+            </div>
+          </div>
+
+        </div>
+      </section>
+
+      <!-- Diagnostics -->
+      <section aria-label="Diagnostics" id="diagnostics">
+        <div class="section-head">
+          <div>
+            <h2>Diagnostics</h2>
+            <p>Nothing is sent automatically — copy and paste into your support email.</p>
+          </div>
+        </div>
+        <div class="diag-strip">
+          <div class="diag-copy">
+            <h3>Copy system info</h3>
+            <p>
+              Includes browser, OS, timezone, viewport, and timestamp.
+              Paste into your email to
+              <a class="subtle-link" href="mailto:support@pycollab.com">support@pycollab.com</a>.
+            </p>
+          </div>
+          <button class="btn-ghost" id="copyBtn" type="button" aria-label="Copy diagnostics to clipboard"
+            style="position:relative;z-index:1;white-space:nowrap;">
+            ⧉ Copy diagnostics
+          </button>
+        </div>
+      </section>
+
+    </div><!-- /page -->
+  </main>
+
+  <footer>
+    <div>© <span id="year"></span> PyCollab</div>
+    <div class="footer-links">
+      <a href="#top">Back to top</a>
+      <a href="https://uptime.techtime.coffee/status/pycollab" target="_blank" rel="noreferrer">Status page</a>
+      <a href="mailto:support@pycollab.com">Email support</a>
+      <a href="/welcome">Home</a>
+    </div>
+  </footer>
+
+  <div class="toast" id="toast" role="status" aria-live="polite">Copied diagnostics ✅</div>
+
+  <script>
+    (function () {
+      /* ── Theme ── */
+      const root = document.documentElement;
+      const saved = localStorage.getItem('theme');
+      const themeBtn = document.getElementById('themeBtn');
+      const themeIcon = document.getElementById('themeIcon');
+
+      const moonIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z"></path></svg>';
+      const sunIcon = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="4.2"></circle><path d="M12 2.8v2.4M12 18.8v2.4M21.2 12h-2.4M5.2 12H2.8M18.5 5.5l-1.7 1.7M7.2 16.8l-1.7 1.7M18.5 18.5l-1.7-1.7M7.2 7.2 5.5 5.5"></path></svg>';
+
+      function applyTheme(t) {
+        root.setAttribute('data-theme', t);
+        themeIcon.innerHTML = t === 'dark' ? moonIcon : sunIcon;
+      }
+
+      applyTheme(saved || 'dark');
+
+      themeBtn.addEventListener('click', function () {
+        const next = root.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+        localStorage.setItem('theme', next);
+        applyTheme(next);
+      });
+
+      /* ── Spotlight ── */
+      window.addEventListener('mousemove', function (e) {
+        root.style.setProperty('--mx', (e.clientX / window.innerWidth * 100) + '%');
+        root.style.setProperty('--my', (e.clientY / window.innerHeight * 100) + '%');
+      });
+
+      /* ── Accordion ── */
+      document.querySelectorAll('.acc-item').forEach(function (item) {
+        var btn = item.querySelector('.acc-btn');
+        btn.addEventListener('click', function () {
+          var isOpen = item.getAttribute('data-open') === 'true';
+          item.setAttribute('data-open', String(!isOpen));
+          btn.setAttribute('aria-expanded', String(!isOpen));
+        });
+      });
+
+      /* ── Diagnostics copy ── */
+      var copyBtn = document.getElementById('copyBtn');
+      var toast = document.getElementById('toast');
+
+      function showToast(msg) {
+        toast.textContent = msg;
+        toast.classList.add('show');
+        clearTimeout(showToast._t);
+        showToast._t = setTimeout(function () { toast.classList.remove('show'); }, 1800);
+      }
+
+      function buildDiag() {
+        var d = new Date();
+        var nav = window.navigator;
+        var tz = Intl.DateTimeFormat().resolvedOptions().timeZone;
+        return [
+          'PyCollab Diagnostics',
+          'Timestamp: ' + d.toISOString(),
+          'Timezone: ' + tz,
+          'Language: ' + (nav.language || 'unknown'),
+          'Viewport: ' + window.innerWidth + 'x' + window.innerHeight,
+          'Screen: ' + window.screen.width + 'x' + window.screen.height,
+          'Platform: ' + (nav.platform || 'unknown'),
+          'User-Agent: ' + (nav.userAgent || 'unknown'),
+          'URL: ' + location.href,
+        ].join('\n');
+      }
+
+      copyBtn.addEventListener('click', function () {
+        var text = buildDiag();
+        if (navigator.clipboard) {
+          navigator.clipboard.writeText(text).then(function () {
+            showToast('Copied diagnostics ✅');
+          }).catch(function () { fallbackCopy(text); });
+        } else { fallbackCopy(text); }
+      });
+
+      function fallbackCopy(text) {
+        var ta = document.createElement('textarea');
+        ta.value = text; ta.style.position = 'fixed'; ta.style.left = '-9999px';
+        document.body.appendChild(ta); ta.focus(); ta.select();
+        try { document.execCommand('copy'); showToast('Copied diagnostics ✅'); }
+        catch (e) { showToast('Could not copy — select manually'); }
+        ta.remove();
+      }
+
+      document.getElementById('year').textContent = new Date().getFullYear();
+    })();
+  </script>
+</body>
+</html>
