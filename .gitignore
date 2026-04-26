@@ -1,0 +1,17 @@
+__pycache__/
+.venv/
+env/
+*.pyc
+node_modules/
+.pytest_cache/
+.playwright-cli/
+.coderabbit/
+output/
+desktop/release/
+desktop/build/
+*.dmg
+# dist/ removed - we want to track built files for deployment
+*.db
+.DS_Store
+.env
+AGENTS.md
