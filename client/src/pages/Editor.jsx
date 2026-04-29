@@ -14,6 +14,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { FiFile, FiFilePlus, FiUsers, FiShare2, FiLogOut, FiPlay, FiTerminal, FiChevronLeft, FiChevronDown, FiEdit2, FiTrash2, FiCopy, FiCheck, FiAlertCircle, FiSun, FiMoon, FiSidebar, FiSearch, FiMenu, FiHome, FiEye, FiEyeOff, FiX, FiSquare, FiMessageSquare, FiSend, FiCode, FiPlus, FiActivity, FiClock, FiZap, FiPhoneCall, FiPhoneOff, FiMic, FiMicOff, FiVolume2, FiRefreshCw, FiWifi, FiWifiOff, FiDownload, FiMoreVertical } from "react-icons/fi";
 import VerifiedBadge from "../components/VerifiedBadge";
 import CommandPalette from "../components/CommandPalette";
+import { usePythonIntelligence } from "../python-intelligence/usePythonIntelligence";
 import { PROJECT_TYPE_PYBRICKS, isPybricksProject as projectUsesPybricks } from "../projects/projectTypes";
 import { copyText } from "../utils/clipboard";
 import { resolveHostedAssetUrl } from "../utils/hostedAssets";
@@ -2436,7 +2437,16 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     setSessionChatInput("");
   };
 
-  const extensions = useMemo(() => [python(), EditorView.lineWrapping, remoteCursorField], []);
+  const { extensions: pythonIntelligenceExtensions } = usePythonIntelligence({
+    files,
+    currentFile,
+    isPybricksProject,
+    runtimeApiBase: API_BASE,
+  });
+  const extensions = useMemo(
+    () => [python(), ...pythonIntelligenceExtensions, EditorView.lineWrapping, remoteCursorField],
+    [pythonIntelligenceExtensions]
+  );
 
   const sortedTasks = useMemo(
     () =>
@@ -3568,7 +3578,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                   readOnly={!canEdit}
                   onCreateEditor={(view) => (editorViewRef.current = view)}
                   onUpdate={onUpdate}
-                  basicSetup={{ lineNumbers: true, foldGutter: true, highlightActiveLine: true, autocompletion: true }}
+                  basicSetup={{ lineNumbers: true, foldGutter: true, highlightActiveLine: true, autocompletion: false }}
                 />
               )}
             </div>

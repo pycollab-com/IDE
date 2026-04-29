@@ -28,6 +28,7 @@ import {
 import { LOCAL_API_BASE, localApi } from "../api";
 import CommandPalette from "../components/CommandPalette";
 import PybricksBlocksEditor from "../pybricks-blocks/ui/PybricksBlocksEditor";
+import { usePythonIntelligence } from "../python-intelligence/usePythonIntelligence";
 import { PROJECT_TYPE_PYBRICKS } from "../projects/projectTypes";
 import PybricksRunner from "../runtime/pybricksRunner";
 import PyodideRunner from "../runtime/pyodideRunner";
@@ -158,6 +159,16 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
   const sortedSnapshots = useMemo(
     () => [...snapshots].sort((left, right) => String(right.created_at || "").localeCompare(String(left.created_at || ""))),
     [snapshots]
+  );
+  const { extensions: pythonIntelligenceExtensions } = usePythonIntelligence({
+    files,
+    currentFile,
+    isPybricksProject,
+    runtimeApiBase: LOCAL_API_BASE,
+  });
+  const pythonExtensions = useMemo(
+    () => [python(), ...pythonIntelligenceExtensions],
+    [pythonIntelligenceExtensions]
   );
 
   const filteredEditorEntries = useMemo(() => {
@@ -1227,10 +1238,10 @@ export default function LocalEditorPage({ theme, toggleTheme, editorTheme }) {
                 <CodeMirror
                   height="100%"
                   value={currentFile.content || ""}
-                  extensions={[python()]}
+                  extensions={pythonExtensions}
                   theme={editorTheme}
                   onChange={handleEditorChange}
-                  basicSetup={{ lineNumbers: true, foldGutter: true, highlightActiveLine: true, autocompletion: true }}
+                  basicSetup={{ lineNumbers: true, foldGutter: true, highlightActiveLine: true, autocompletion: false }}
                 />
               ) : (
                 <div className="editor-mobile-unavailable">

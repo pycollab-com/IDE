@@ -3092,6 +3092,115 @@ button {
   color: var(--text-muted);
 }
 
+.cm-tooltip-autocomplete {
+  background: color-mix(in srgb, var(--panel-bg) 94%, var(--editor-bg));
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  color: var(--text-color);
+  overflow: hidden;
+  padding: 6px;
+}
+
+.cm-tooltip-autocomplete > ul {
+  font-family: var(--font-mono);
+  font-size: 0.82rem;
+  max-height: min(320px, 42vh);
+}
+
+.cm-tooltip-autocomplete ul li[aria-selected] {
+  background: rgba(137, 152, 120, 0.22);
+  color: var(--text-color);
+  border-radius: 10px;
+}
+
+.cm-tooltip-autocomplete .cm-completionLabel {
+  color: var(--text-color);
+}
+
+.cm-tooltip-autocomplete .cm-completionDetail {
+  color: var(--text-muted);
+  font-size: 0.75rem;
+}
+
+.cm-tooltip-autocomplete .cm-completionIcon {
+  opacity: 0.72;
+}
+
+.cm-python-intelligence-tooltip {
+  background: color-mix(in srgb, var(--panel-bg) 94%, var(--editor-bg));
+  border: 1px solid var(--border-color);
+  border-radius: 14px;
+  box-shadow: var(--shadow-lg);
+  color: var(--text-color);
+  max-width: min(460px, 82vw);
+  padding: 12px 14px;
+}
+
+.cm-python-intelligence-floating-layer {
+  pointer-events: none;
+}
+
+.cm-python-intelligence-signature {
+  color: var(--text-color);
+  font-family: var(--font-mono);
+  font-size: 0.81rem;
+  line-height: 1.45;
+  margin-bottom: 8px;
+  white-space: pre-wrap;
+}
+
+.cm-python-intelligence-signature-active {
+  background: rgba(137, 152, 120, 0.24);
+  border-radius: 6px;
+  color: var(--text-color);
+  padding: 1px 4px;
+}
+
+.cm-python-intelligence-section {
+  color: var(--text-color);
+  display: grid;
+  gap: 6px;
+}
+
+.cm-python-intelligence-section + .cm-python-intelligence-section {
+  margin-top: 10px;
+}
+
+.cm-python-intelligence-heading {
+  color: var(--text-muted);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.cm-python-intelligence-body,
+.cm-python-intelligence-parameter-doc {
+  color: var(--text-color);
+  font-size: 0.82rem;
+  line-height: 1.55;
+  white-space: pre-wrap;
+}
+
+.cm-python-intelligence-parameter-row {
+  border-radius: 10px;
+  display: grid;
+  gap: 4px;
+  padding: 8px 10px;
+}
+
+.cm-python-intelligence-parameter-row.is-active {
+  background: rgba(137, 152, 120, 0.14);
+  border: 1px solid rgba(137, 152, 120, 0.24);
+}
+
+.cm-python-intelligence-parameter-label {
+  color: var(--text-color);
+  font-family: var(--font-mono);
+  font-size: 0.76rem;
+}
+
 /* Spinner */
 .spinner {
   width: 24px;
