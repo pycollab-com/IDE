@@ -148,6 +148,7 @@ export default function Profile({ user: currentUser }) {
                 setProjects([]);
                 setStats({ followers: 0, following: 0 });
                 setResolvedUserId(null);
+                navigate("/404", { replace: true });
                 return;
             }
             setResolvedUserId(targetUserId);
@@ -163,6 +164,10 @@ export default function Profile({ user: currentUser }) {
             setProjects([]);
             setStats({ followers: 0, following: 0 });
             setResolvedUserId(null);
+            if (e?.response?.status === 404) {
+                navigate("/404", { replace: true });
+                return;
+            }
             console.error(e);
         } finally {
             setLoading(false);

@@ -20,16 +20,18 @@ import ProfilePage from "./pages/Profile";
 import ExplorePage from "./pages/Explore";
 import MessagesPage from "./pages/Messages";
 import AdminPage from "./pages/Admin";
+import BannedPage from "./pages/Banned";
 import ShareJoin from "./pages/ShareJoin";
 import CachedProjectPage from "./pages/CachedProject";
 import { getDesktopContext } from "./utils/desktopBridge";
 
-const ProtectedRoute = ({ authenticated, children }) => {
+const ProtectedRoute = ({ authenticated, user, children }) => {
   if (!authenticated) return <Navigate to="/login" replace />;
+  if (user?.is_banned) return <BannedPage user={user} />;
   return children;
 };
 
-const AdminRoute = ({ authenticated, children }) => {
+const AdminRoute = ({ authenticated, user, children }) => {
   const [status, setStatus] = useState("checking");
 
   useEffect(() => {
@@ -57,12 +59,16 @@ const AdminRoute = ({ authenticated, children }) => {
   }, [authenticated]);
 
   if (!authenticated || status === "unauthorized") return <Navigate to="/login" replace />;
+  if (user?.is_banned) return <BannedPage user={user} />;
   if (status === "forbidden") return <Navigate to="/" replace />;
   if (status !== "authorized") return null;
   return children;
 };
 
 const ProfileRoute = ({ user, onLogout, theme, toggleTheme }) => {
+  if (user?.is_banned) {
+    return <BannedPage user={user} />;
+  }
   if (!user) {
     return <ProfilePage user={user} />;
   }
@@ -91,6 +97,12 @@ export default function App() {
   const isAuthRoute = location.pathname === "/login" || location.pathname === "/register";
   const hasCompletedHostedCheck = Boolean(serviceStatus.checkedAt);
   const hostedOffline = hasCompletedHostedCheck && serviceStatus.hostedOnline === false;
+
+  const setBannedUser = () => {
+    const currentUser = loadStoredUser() || user;
+    if (!currentUser) return;
+    setUser(storeUser({ ...currentUser, is_banned: true }));
+  };
 
   const toggleTheme = () => setTheme((prev) => (prev === "dark" ? "light" : "dark"));
   const editorTheme = theme === "dark" ? dracula : bbedit;
@@ -217,6 +229,15 @@ export default function App() {
     }
   }, [authenticated, hostedOffline, location.pathname, navigate]);
 
+  useEffect(() => {
+    const handleBanned = () => {
+      setBannedUser();
+      navigate("/", { replace: true });
+    };
+    window.addEventListener("pycollab:account-banned", handleBanned);
+    return () => window.removeEventListener("pycollab:account-banned", handleBanned);
+  }, [navigate, user]);
+
   const handleAuth = async (payload) => {
     setUserPersisted(payload.user, payload.access_token);
     try {
@@ -247,8 +268,14 @@ export default function App() {
       <AnimatePresence mode="wait">
         <Routes location={location} key={location.pathname}>
           <Route path="/welcome" element={<Navigate to="/login" replace />} />
-          <Route path="/login" element={<LoginPage onAuth={handleAuth} theme={theme} toggleTheme={toggleTheme} />} />
-          <Route path="/register" element={<RegisterPage onAuth={handleAuth} theme={theme} toggleTheme={toggleTheme} />} />
+          <Route
+            path="/login"
+            element={user?.is_banned ? <BannedPage user={user} /> : <LoginPage onAuth={handleAuth} theme={theme} toggleTheme={toggleTheme} />}
+          />
+          <Route
+            path="/register"
+            element={user?.is_banned ? <BannedPage user={user} /> : <RegisterPage onAuth={handleAuth} theme={theme} toggleTheme={toggleTheme} />}
+          />
           <Route path="/local" element={<Navigate to="/" replace />} />
           <Route
             path="/local/projects/:id"
@@ -272,7 +299,7 @@ export default function App() {
 
           <Route
             element={
-              <ProtectedRoute authenticated={authenticated}>
+              <ProtectedRoute authenticated={authenticated} user={user}>
                 <Layout
                   user={user}
                   onLogout={logout}
@@ -294,7 +321,7 @@ export default function App() {
             <Route
             path="/admin"
             element={
-                <AdminRoute authenticated={authenticated}>
+                <AdminRoute authenticated={authenticated} user={user}>
                   <AdminPage user={user} theme={theme} toggleTheme={toggleTheme} />
                 </AdminRoute>
               }
@@ -308,7 +335,7 @@ export default function App() {
           <Route
             path="/projects/:id"
             element={
-              <ProtectedRoute authenticated={authenticated}>
+              <ProtectedRoute authenticated={authenticated} user={user}>
                 {serviceStatus.hostedOnline ? (
                   <HostedEditorPage
                     user={user}

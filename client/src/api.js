@@ -40,6 +40,9 @@ const hostedApi = axios.create({
   baseURL: DESKTOP_HOSTED_PROXY_BASE,
 });
 
+const isBannedDetail = (detail) =>
+  typeof detail === "string" && detail.toLowerCase().includes("your account has been banned");
+
 hostedApi.interceptors.request.use((config) => {
   const token = getToken();
   if (token) {
@@ -47,6 +50,16 @@ hostedApi.interceptors.request.use((config) => {
   }
   return config;
 });
+
+hostedApi.interceptors.response.use(
+  (response) => response,
+  (error) => {
+    if (isBannedDetail(error?.response?.data?.detail) && typeof window !== "undefined") {
+      window.dispatchEvent(new CustomEvent("pycollab:account-banned", { detail: error.response.data.detail }));
+    }
+    return Promise.reject(error);
+  },
+);
 
 export { API_BASE, HOSTED_API_BASE, HOSTED_WEB_BASE, LOCAL_API_BASE, hostedApi, localApi };
 export default hostedApi;

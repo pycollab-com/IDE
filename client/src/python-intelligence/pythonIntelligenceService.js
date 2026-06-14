@@ -105,10 +105,6 @@ export class PythonIntelligenceService {
     }
 
     const requestId = ++this.requestId;
-    console.log("[py-intel] request", {
-      requestId,
-      type,
-    });
     const runRequest = () =>
       new Promise((resolve, reject) => {
         this.pendingRequests.set(requestId, { resolve, reject });

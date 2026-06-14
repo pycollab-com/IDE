@@ -3,17 +3,19 @@ import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import CodeMirror, { ExternalChange } from "@uiw/react-codemirror";
 import { python } from "@codemirror/lang-python";
 import { EditorView, Decoration, WidgetType } from "@codemirror/view";
-import { ChangeSet, RangeSetBuilder, StateEffect, StateField } from "@codemirror/state";
+import { ChangeSet, StateEffect, StateField } from "@codemirror/state";
 import { io } from "socket.io-client";
 import api, { API_BASE, HOSTED_WEB_BASE } from "../api";
 import { getToken } from "../auth";
+import { freezeSerializable } from "../session";
 import PyodideRunner from "../runtime/pyodideRunner";
 import PybricksRunner from "../runtime/pybricksRunner";
 import PybricksBlocksEditor from "../pybricks-blocks/ui/PybricksBlocksEditor";
 import { motion, AnimatePresence } from "framer-motion";
-import { FiFile, FiFilePlus, FiUsers, FiShare2, FiLogOut, FiPlay, FiTerminal, FiChevronLeft, FiChevronDown, FiEdit2, FiTrash2, FiCopy, FiCheck, FiAlertCircle, FiSun, FiMoon, FiSidebar, FiSearch, FiMenu, FiHome, FiEye, FiEyeOff, FiX, FiSquare, FiMessageSquare, FiSend, FiCode, FiPlus, FiActivity, FiClock, FiZap, FiPhoneCall, FiPhoneOff, FiMic, FiMicOff, FiVolume2, FiRefreshCw, FiWifi, FiWifiOff, FiDownload, FiMoreVertical } from "react-icons/fi";
-import VerifiedBadge from "../components/VerifiedBadge";
+import { FiFile, FiFilePlus, FiFolder, FiFolderPlus, FiUsers, FiShare2, FiLogOut, FiPlay, FiTerminal, FiChevronLeft, FiChevronDown, FiChevronRight, FiEdit2, FiTrash2, FiCopy, FiCheck, FiAlertCircle, FiSearch, FiMenu, FiHome, FiEye, FiEyeOff, FiX, FiSquare, FiMessageSquare, FiSend, FiCode, FiPlus, FiActivity, FiClock, FiZap, FiPhoneCall, FiPhoneOff, FiMic, FiMicOff, FiVolume2, FiRefreshCw, FiWifi, FiWifiOff, FiDownload, FiMoreVertical } from "react-icons/fi";
 import CommandPalette from "../components/CommandPalette";
+import ProjectSearch from "../components/ProjectSearch";
+import CheckpointInspectorModal from "../components/CheckpointInspectorModal";
 import { usePythonIntelligence } from "../python-intelligence/usePythonIntelligence";
 import { PROJECT_TYPE_PYBRICKS, isPybricksProject as projectUsesPybricks } from "../projects/projectTypes";
 import { copyText } from "../utils/clipboard";
@@ -30,16 +32,20 @@ const remoteCursorField = StateField.define({
     value = value.map(tr.changes);
     for (const e of tr.effects) {
       if (e.is(setRemoteCursors)) {
-        const builder = new RangeSetBuilder();
+        const decorations = [];
         (e.value || []).forEach((cur) => {
           if (typeof cur.from === "number" && typeof cur.to === "number") {
             if (cur.from !== cur.to) {
-              builder.add(cur.from, cur.to, Decoration.mark({ attributes: { style: `background: ${cur.color}4D;` } }));
+              decorations.push(
+                Decoration.mark({ attributes: { style: `background: ${cur.color}4D;` } }).range(cur.from, cur.to),
+              );
             }
-            builder.add(cur.to, cur.to, Decoration.widget({ widget: new RemoteCursorWidget(cur.color, cur.label) }));
+            decorations.push(
+              Decoration.widget({ widget: new RemoteCursorWidget(cur.color, cur.label) }).range(cur.to),
+            );
           }
         });
-        value = builder.finish();
+        value = Decoration.set(decorations);
       }
     }
     return value;
@@ -116,6 +122,16 @@ const applyChangeSetToString = (text, changeset) => {
   return out.join("");
 };
 
+const EMPTY_PROJECT_PERMISSIONS = Object.freeze({
+  is_owner: false,
+  is_collaborator: false,
+  can_view: false,
+  can_edit: false,
+  can_manage: false,
+  can_share: false,
+  can_toggle_visibility: false,
+});
+
 const ANSI_ESCAPE_REGEX = /\u001b\[[0-9;?]*[ -/]*[@-~]/g;
 const MAX_PROMPT_LENGTH = 120;
 const ACTIVITY_MAX_ITEMS = 60;
@@ -168,6 +184,25 @@ const checkpointArchiveFileName = (projectName, snapshotName) => {
   return `${safeProjectName || "project"}-${safeSnapshotName || "checkpoint"}.zip`;
 };
 
+const projectBundleFileName = (projectName) => {
+  const safeProjectName = (projectName || "project")
+    .trim()
+    .replace(/[^a-z0-9._-]+/gi, "-")
+    .replace(/^-+|-+$/g, "");
+  return `${safeProjectName || "project"}.zip`;
+};
+
+const downloadBlob = (blob, fileName) => {
+  const downloadUrl = window.URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = downloadUrl;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => window.URL.revokeObjectURL(downloadUrl), 0);
+};
+
 const inferPendingPrompt = (text) => {
   const normalized = text.replace(/\r/g, "");
   if (normalized.endsWith("\n")) {
@@ -206,6 +241,183 @@ const normalizeTerminalText = (value, fallback = "") => {
   }
 };
 
+const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
+
+const EDITOR_SIDEBAR_WIDTH_STORAGE_KEY = "pycollab.editor.sidebarWidth";
+const EDITOR_TERMINAL_HEIGHT_STORAGE_KEY = "pycollab.editor.terminalHeight";
+const DEFAULT_EDITOR_SIDEBAR_WIDTH = 300;
+const MIN_EDITOR_SIDEBAR_WIDTH = 260;
+const MAX_EDITOR_SIDEBAR_WIDTH = 460;
+const DEFAULT_TERMINAL_HEIGHT = 340;
+const MIN_TERMINAL_HEIGHT = 220;
+const MAX_TERMINAL_HEIGHT = 520;
+const TREE_ROOT = "";
+
+const readStoredEditorDimension = (key, fallback, min, max) => {
+  if (typeof window === "undefined") return fallback;
+  const parsed = Number(window.localStorage.getItem(key));
+  if (!Number.isFinite(parsed)) return fallback;
+  return clampNumber(parsed, min, max);
+};
+
+const normalizeTreePath = (path) =>
+  String(path || "")
+    .replace(/\\/g, "/")
+    .trim()
+    .replace(/^\/+|\/+$/g, "")
+    .split("/")
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .join("/");
+
+const treeParentPath = (path) => {
+  const normalized = normalizeTreePath(path);
+  const index = normalized.lastIndexOf("/");
+  return index === -1 ? TREE_ROOT : normalized.slice(0, index);
+};
+
+const treeBaseName = (path) => {
+  const normalized = normalizeTreePath(path);
+  const index = normalized.lastIndexOf("/");
+  return index === -1 ? normalized : normalized.slice(index + 1);
+};
+
+const compareTreeEntries = (left, right) => {
+  const leftOrder = Number.isFinite(Number(left.sortOrder)) ? Number(left.sortOrder) : 0;
+  const rightOrder = Number.isFinite(Number(right.sortOrder)) ? Number(right.sortOrder) : 0;
+  if (leftOrder !== rightOrder) return leftOrder - rightOrder;
+  const rank = { blocks: 0, folder: 1, file: 2 };
+  const leftRank = rank[left.kind] ?? 99;
+  const rightRank = rank[right.kind] ?? 99;
+  if (leftRank !== rightRank) return leftRank - rightRank;
+  return String(left.name || "").localeCompare(String(right.name || ""), undefined, { sensitivity: "base" });
+};
+
+const createFolderNode = ({ id = null, path, sortOrder = 0, explicit = false }) => ({
+  kind: "folder",
+  id,
+  key: id ? `folder-${id}` : `folder-implicit-${path}`,
+  path,
+  parentPath: treeParentPath(path),
+  name: treeBaseName(path),
+  sortOrder,
+  explicit,
+  children: [],
+});
+
+const buildEditorTree = ({ files, folders, blockDocuments, query }) => {
+  const folderByPath = new Map();
+  const entriesByParent = new Map();
+  const root = { kind: "root", path: TREE_ROOT, children: [] };
+
+  const addChild = (parentPath, node) => {
+    const key = parentPath || TREE_ROOT;
+    const siblings = entriesByParent.get(key) || [];
+    if (!siblings.some((entry) => entry.key === node.key)) {
+      siblings.push(node);
+      entriesByParent.set(key, siblings);
+    }
+  };
+
+  const ensureFolder = (path, explicitFolder = null) => {
+    const normalized = normalizeTreePath(path);
+    if (!normalized) return root;
+    const existing = folderByPath.get(normalized);
+    if (existing) {
+      if (explicitFolder) {
+        existing.id = explicitFolder.id;
+        existing.key = `folder-${explicitFolder.id}`;
+        existing.sortOrder = explicitFolder.sort_order ?? explicitFolder.sortOrder ?? existing.sortOrder;
+        existing.explicit = true;
+      }
+      return existing;
+    }
+
+    const parentPath = treeParentPath(normalized);
+    const parentNode = ensureFolder(parentPath);
+    const node = createFolderNode({
+      id: explicitFolder?.id ?? null,
+      path: normalized,
+      sortOrder: explicitFolder?.sort_order ?? explicitFolder?.sortOrder ?? 0,
+      explicit: Boolean(explicitFolder),
+    });
+    folderByPath.set(normalized, node);
+    parentNode.children.push(node);
+    addChild(parentPath, node);
+    return node;
+  };
+
+  (folders || []).forEach((folder) => ensureFolder(folder.path, folder));
+
+  (blockDocuments || []).forEach((document, index) => {
+    const node = {
+      kind: "blocks",
+      id: document.id,
+      key: `blocks-${document.id}`,
+      name: document.name,
+      generatedEntryModule: document.generated_entry_module || "main.py",
+      sortOrder: -100000 + index,
+      parentPath: TREE_ROOT,
+    };
+    root.children.push(node);
+  });
+
+  (files || []).forEach((file) => {
+    const filePath = normalizeTreePath(file.name);
+    const parentPath = treeParentPath(filePath);
+    const parentNode = ensureFolder(parentPath);
+    const node = {
+      kind: "file",
+      id: file.id,
+      key: `file-${file.id}`,
+      name: treeBaseName(filePath),
+      path: filePath,
+      fullName: file.name,
+      parentPath,
+      sortOrder: file.sort_order ?? file.sortOrder ?? 0,
+    };
+    parentNode.children.push(node);
+    addChild(parentPath, node);
+  });
+
+  const sortNode = (node) => {
+    node.children?.sort(compareTreeEntries);
+    node.children?.forEach(sortNode);
+  };
+  sortNode(root);
+  entriesByParent.forEach((siblings) => siblings.sort(compareTreeEntries));
+
+  const normalizedQuery = String(query || "").trim().toLowerCase();
+  const filterNode = (node) => {
+    if (!normalizedQuery) return node;
+    if (node.kind === "file" || node.kind === "blocks") {
+      return String(node.fullName || node.name || "").toLowerCase().includes(normalizedQuery) ? node : null;
+    }
+    if (node.kind === "folder") {
+      const nextChildren = (node.children || []).map(filterNode).filter(Boolean);
+      const selfMatches = node.path.toLowerCase().includes(normalizedQuery);
+      if (!selfMatches && nextChildren.length === 0) return null;
+      return { ...node, children: nextChildren };
+    }
+    return {
+      ...node,
+      children: (node.children || []).map(filterNode).filter(Boolean),
+    };
+  };
+
+  return {
+    root: filterNode(root),
+    entriesByParent,
+  };
+};
+
+const upsertById = (items, nextItem) => {
+  if (!nextItem || typeof nextItem.id !== "number") return items;
+  const index = items.findIndex((item) => item.id === nextItem.id);
+  if (index === -1) return [...items, nextItem];
+  return items.map((item) => (item.id === nextItem.id ? nextItem : item));
+};
+
 export default function EditorPage({ user, onLogout, theme, toggleTheme, editorTheme }) {
   const { id } = useParams();
   const [searchParams] = useSearchParams();
@@ -230,11 +442,14 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
 
   const [project, setProject] = useState(null);
   const [files, setFiles] = useState([]);
+  const [folders, setFolders] = useState([]);
   const [blockDocuments, setBlockDocuments] = useState([]);
   const [currentFileId, setCurrentFileId] = useState(null);
   const currentFileIdRef = useRef(null);
   const [currentBlockDocumentId, setCurrentBlockDocumentId] = useState(null);
+  const currentBlockDocumentIdRef = useRef(null);
   const [activeEditorKind, setActiveEditorKind] = useState("file");
+  const activeEditorKindRef = useRef("file");
   const [showGeneratedBlockCode, setShowGeneratedBlockCode] = useState(false);
   const [generatedBlockCode, setGeneratedBlockCode] = useState("");
   const generatedBlockCodeRef = useRef("");
@@ -254,7 +469,12 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const [creatingSnapshot, setCreatingSnapshot] = useState(false);
   const [restoringSnapshotId, setRestoringSnapshotId] = useState(null);
   const [exportingSnapshotId, setExportingSnapshotId] = useState(null);
+  const [exportingProjectBundle, setExportingProjectBundle] = useState(false);
   const [openSnapshotMenuId, setOpenSnapshotMenuId] = useState(null);
+  const [checkpointInspectorSnapshot, setCheckpointInspectorSnapshot] = useState(null);
+  const [checkpointInspection, setCheckpointInspection] = useState(null);
+  const [loadingCheckpointInspection, setLoadingCheckpointInspection] = useState(false);
+  const [checkpointInspectionError, setCheckpointInspectionError] = useState("");
   const [followTargetId, setFollowTargetId] = useState(null);
   const [followFlash, setFollowFlash] = useState("");
   const [voiceEnabled, setVoiceEnabled] = useState(false);
@@ -280,6 +500,9 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     selectedSlot: 0,
     hubRunning: false,
   });
+  const [remoteHubSession, setRemoteHubSession] = useState(null);
+  const [remoteHubPendingRequests, setRemoteHubPendingRequests] = useState([]);
+  const [remoteHubNotice, setRemoteHubNotice] = useState("");
   const [pybricksConnectModalOpen, setPybricksConnectModalOpen] = useState(false);
   const [awaitingInput, setAwaitingInput] = useState(false);
   const [inputPrompt, setInputPrompt] = useState("");
@@ -287,19 +510,44 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     typeof window !== "undefined" ? !window.matchMedia("(max-width: 768px)").matches : true
   );
   const [terminalOpen, setTerminalOpen] = useState(true);
+  const [sidebarWidth, setSidebarWidth] = useState(() =>
+    readStoredEditorDimension(
+      EDITOR_SIDEBAR_WIDTH_STORAGE_KEY,
+      DEFAULT_EDITOR_SIDEBAR_WIDTH,
+      MIN_EDITOR_SIDEBAR_WIDTH,
+      MAX_EDITOR_SIDEBAR_WIDTH
+    )
+  );
+  const [terminalHeight, setTerminalHeight] = useState(() =>
+    readStoredEditorDimension(
+      EDITOR_TERMINAL_HEIGHT_STORAGE_KEY,
+      DEFAULT_TERMINAL_HEIGHT,
+      MIN_TERMINAL_HEIGHT,
+      MAX_TERMINAL_HEIGHT
+    )
+  );
   const [runHistoryOpen, setRunHistoryOpen] = useState(false);
   const [runHistory, setRunHistory] = useState([]);
   const [activeRunReplayId, setActiveRunReplayId] = useState(null);
   const [fileSearch, setFileSearch] = useState("");
   const [createFileMenuOpen, setCreateFileMenuOpen] = useState(false);
+  const [filesCollapsed, setFilesCollapsed] = useState(false);
+  const [expandedFolders, setExpandedFolders] = useState({});
+  const [draggingTreeEntry, setDraggingTreeEntry] = useState(null);
+  const [treeDropTarget, setTreeDropTarget] = useState(null);
+  const [activeSidebarScreen, setActiveSidebarScreen] = useState("");
   const [commandPaletteOpen, setCommandPaletteOpen] = useState(false);
   const [commandPaletteQuery, setCommandPaletteQuery] = useState("");
+  const [projectSearchOpen, setProjectSearchOpen] = useState(false);
+  const pendingSearchSelectionRef = useRef(null);
   const editorViewRef = useRef(null);
   const socketRef = useRef(null);
   const runnerRef = useRef(null);
   const collabRef = useRef({});
   const filesRef = useRef([]);
+  const foldersRef = useRef([]);
   const blockDocumentsRef = useRef([]);
+  const draggingTreeEntryRef = useRef(null);
   const projectApiIdRef = useRef(null);
   const activityBootstrappedRef = useRef(false);
   const localStreamRef = useRef(null);
@@ -312,15 +560,40 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const voiceEnabledRef = useRef(false);
   const voicePanelOpenRef = useRef(false);
   const voiceMutedRef = useRef(false);
+  const latestInspectRequestIdRef = useRef(0);
   const terminalBodyRef = useRef(null);
   const stdinInputRef = useRef(null);
   const runningRef = useRef(false);
   const outputRef = useRef("");
   const runMetaRef = useRef({ runId: null, startedAt: 0, fileName: "", capture: null });
   const runtimeEverReadyRef = useRef(false);
+  const pybricksHubStateRef = useRef({
+    connected: false,
+    status: "disconnected",
+    transport: null,
+    transportLabel: "",
+    deviceName: "",
+    maxWriteSize: 0,
+    maxUserProgramSize: 0,
+    numOfSlots: 0,
+    selectedSlot: 0,
+    hubRunning: false,
+  });
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(EDITOR_SIDEBAR_WIDTH_STORAGE_KEY, String(Math.round(sidebarWidth)));
+  }, [sidebarWidth]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    window.localStorage.setItem(EDITOR_TERMINAL_HEIGHT_STORAGE_KEY, String(Math.round(terminalHeight)));
+  }, [terminalHeight]);
+  const remoteHubSessionRef = useRef(null);
   const mirroredCursorRef = useRef({ fileId: null, from: -1, to: -1 });
   const sharePinCardRef = useRef(null);
   const createFileMenuRef = useRef(null);
+  const fileSearchInputRef = useRef(null);
   const scrollSharePinIntoView = () => {
     requestAnimationFrame(() => {
       sharePinCardRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
@@ -382,8 +655,30 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   }, [currentFileId]);
 
   useEffect(() => {
+    currentBlockDocumentIdRef.current = currentBlockDocumentId;
+  }, [currentBlockDocumentId]);
+
+  useEffect(() => {
+    activeEditorKindRef.current = activeEditorKind;
+  }, [activeEditorKind]);
+
+  useEffect(() => {
     runningRef.current = running;
   }, [running]);
+
+  useEffect(() => {
+    pybricksHubStateRef.current = pybricksHubState;
+  }, [pybricksHubState]);
+
+  useEffect(() => {
+    remoteHubSessionRef.current = remoteHubSession;
+  }, [remoteHubSession]);
+
+  useEffect(() => {
+    if (!remoteHubNotice) return undefined;
+    const timer = window.setTimeout(() => setRemoteHubNotice(""), 4200);
+    return () => window.clearTimeout(timer);
+  }, [remoteHubNotice]);
 
   useEffect(() => {
     outputRef.current = output;
@@ -414,6 +709,10 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   useEffect(() => {
     filesRef.current = files;
   }, [files]);
+
+  useEffect(() => {
+    foldersRef.current = folders;
+  }, [folders]);
 
   useEffect(() => {
     blockDocumentsRef.current = blockDocuments;
@@ -950,14 +1249,42 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
 
   const flushEdits = async (fileId, timeoutMs = 2000) => {
     const st = getCollabState(fileId);
-    if (!st) return;
+    if (!st) return { ok: true };
 
     if (st.pending && !st.inFlight) sendPendingOp(fileId);
 
     const start = Date.now();
     while (Date.now() - start < timeoutMs) {
-      if (!st.pending && !st.buffer && !st.inFlight) return;
+      if (!st.pending && !st.buffer && !st.inFlight) return { ok: true };
       await new Promise((r) => setTimeout(r, 25));
+    }
+
+    return { ok: false, reason: "timeout" };
+  };
+
+  const flushAllEdits = async () => {
+    const failures = [];
+
+    for (const file of files) {
+      try {
+        const result = await flushEdits(file.id);
+        if (result?.ok === false) {
+          failures.push({
+            fileName: file.name || "Untitled file",
+            reason: result.reason || "unknown error",
+          });
+        }
+      } catch (error) {
+        failures.push({
+          fileName: file.name || "Untitled file",
+          reason: error instanceof Error && error.message ? error.message : "unknown error",
+        });
+      }
+    }
+
+    if (failures.length > 0) {
+      const details = failures.map(({ fileName, reason }) => `${fileName} (${reason})`).join(", ");
+      throw new Error(`Failed to flush pending edits before continuing: ${details}`);
     }
   };
 
@@ -969,12 +1296,28 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const isBlockEditorActive = isPybricksProject && hasBlockDocuments && activeEditorKind === "blocks" && !!currentBlockDocument;
   const projectApiId = project?.id ?? null;
   const socketProjectId = projectApiId != null ? String(projectApiId) : null;
+  const remoteHubHost = remoteHubSession?.host || null;
+  const remoteHubGuest = (remoteHubSession?.guests || []).find((entry) => entry.userId === user?.id) || null;
+  const remoteHubPendingUserIds = Array.isArray(remoteHubSession?.pendingUserIds)
+    ? remoteHubSession.pendingUserIds
+    : [];
+  const isRemoteHubHost = Boolean(remoteHubHost && remoteHubHost.userId === user?.id);
+  const hasRemoteHubGuestAccess = Boolean(remoteHubGuest);
+  const remoteHubRequestPending = Boolean(user?.id && remoteHubPendingUserIds.includes(user.id));
+  const remoteHubTakenByOther = Boolean(remoteHubHost && remoteHubHost.userId !== user?.id);
+  const isRemoteHubGuestMode = Boolean(isPybricksProject && remoteHubTakenByOther && hasRemoteHubGuestAccess);
+  const canConnectLocalPybricksHub = Boolean(isPybricksProject && (!remoteHubHost || isRemoteHubHost));
   const pybricksConnectionBusy = pybricksHubState.status === "connecting";
-  const pybricksRuntimeOnline = isPybricksProject ? pybricksHubState.connected : runtimeReady;
+  const pybricksRuntimeOnline = isPybricksProject
+    ? isRemoteHubGuestMode
+      ? Boolean(remoteHubHost)
+      : pybricksHubState.connected
+    : runtimeReady;
 
   const [ghostMode, setGhostMode] = useState(false);
   const [canEdit, setCanEdit] = useState(false);
   const isViewerMode = !canEdit;
+  const projectPermissions = project?.permissions || EMPTY_PROJECT_PERMISSIONS;
 
   useEffect(() => {
     projectApiIdRef.current = projectApiId;
@@ -1011,10 +1354,12 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       const res = shareToken
         ? await api.post(`/projects/access/${shareToken}`)
         : await api.get(`/projects/${id}`);
+      const projectPayload = freezeSerializable(res.data);
       const resolvedProjectId = res.data.id;
-      const projectIsPybricks = projectUsesPybricks(res.data);
-      setProject(res.data);
+      const projectIsPybricks = projectUsesPybricks(projectPayload);
+      setProject(projectPayload);
       setFiles(res.data.files || []);
+      setFolders(res.data.folders || []);
       const incomingBlockDocuments = projectIsPybricks ? res.data.block_documents || [] : [];
       setBlockDocuments(incomingBlockDocuments);
       if (!currentFileId && res.data.files?.length) {
@@ -1030,12 +1375,8 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       setActiveEditorKind(initialEditorKind);
       setTerminalOpen(initialEditorKind !== "blocks");
 
-      // Permission Check
-      const isOwner = res.data.owner_id === user?.id;
-      const isCollab = res.data.collaborators?.some(c => c.user_id === user?.id);
-      const isAdmin = user?.is_admin;
-
-      setCanEdit(isOwner || isCollab || isAdmin);
+      const permissions = projectPayload.permissions || EMPTY_PROJECT_PERMISSIONS;
+      setCanEdit(Boolean(permissions.can_edit));
       try {
         const tasksRes = await api.get(`/projects/${resolvedProjectId}/tasks`);
         setTasks(tasksRes.data || []);
@@ -1049,7 +1390,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         setSnapshots([]);
       }
 
-      if (!(isOwner || isCollab || isAdmin)) {
+      if (!permissions.can_edit) {
         // Read Only Mode - Do not connect socket if we don't want them to be seen? 
         // Actually viewers can be seen, but they are read-only.
         // Unless they are just browsing public project anonymously?
@@ -1060,6 +1401,54 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       setError(err.response?.data?.detail || "Project unavailable");
       if (err.response?.status === 403 || err.response?.status === 404) {
         navigate("/");
+      }
+    }
+  };
+
+  const applyProjectTreeState = (data) => {
+    const incomingFiles = Array.isArray(data?.files) ? data.files : [];
+    const incomingFolders = Array.isArray(data?.folders) ? data.folders : [];
+    const incomingBlockDocuments = Array.isArray(data?.blockDocuments) ? data.blockDocuments : [];
+
+    setFiles(incomingFiles);
+    setFolders(incomingFolders);
+    setBlockDocuments(incomingBlockDocuments);
+
+    incomingFiles.forEach((file) => {
+      const st = getCollabState(file.id);
+      if (!st) return;
+      st.rev = typeof file.rev === "number" ? file.rev : st.rev || 0;
+      st.pending = null;
+      st.buffer = null;
+      st.inFlight = false;
+      st.opId = null;
+    });
+
+    const activeFileStillExists =
+      typeof currentFileIdRef.current === "number" &&
+      incomingFiles.some((file) => file.id === currentFileIdRef.current);
+    const activeBlockStillExists =
+      typeof currentBlockDocumentIdRef.current === "number" &&
+      incomingBlockDocuments.some((document) => document.id === currentBlockDocumentIdRef.current);
+
+    if (!activeFileStillExists && activeEditorKindRef.current === "file") {
+      if (incomingFiles[0]?.id) {
+        setCurrentFileId(incomingFiles[0].id);
+        setActiveEditorKind("file");
+      } else if (isPybricksProject && incomingBlockDocuments[0]?.id) {
+        setCurrentFileId(null);
+        setCurrentBlockDocumentId(incomingBlockDocuments[0].id);
+        setActiveEditorKind("blocks");
+      } else {
+        setCurrentFileId(null);
+      }
+    }
+
+    if (!activeBlockStillExists) {
+      setCurrentBlockDocumentId(incomingBlockDocuments[0]?.id || null);
+      if (activeEditorKindRef.current === "blocks" && !incomingBlockDocuments[0]?.id) {
+        setActiveEditorKind(incomingFiles[0]?.id ? "file" : "file");
+        setCurrentFileId(incomingFiles[0]?.id || null);
       }
     }
   };
@@ -1083,11 +1472,18 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     setVoiceJoining(false);
     setVoiceMuted(false);
     setBlockDocuments([]);
+    setFolders([]);
+    setExpandedFolders({});
+    setDraggingTreeEntry(null);
+    setTreeDropTarget(null);
     setCurrentBlockDocumentId(null);
     setActiveEditorKind("file");
     setShowGeneratedBlockCode(false);
     setGeneratedBlockCode("");
     generatedBlockCodeRef.current = "";
+    setRemoteHubSession(null);
+    setRemoteHubPendingRequests([]);
+    setRemoteHubNotice("");
     setPybricksHubState({
       connected: false,
       status: "disconnected",
@@ -1101,6 +1497,10 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       hubRunning: false,
     });
     setPybricksConnectModalOpen(false);
+    setCheckpointInspectorSnapshot(null);
+    setCheckpointInspection(null);
+    setCheckpointInspectionError("");
+    setLoadingCheckpointInspection(false);
     activityBootstrappedRef.current = false;
     mirroredCursorRef.current = { fileId: null, from: -1, to: -1 };
     loadProject();
@@ -1119,12 +1519,13 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     if (!socket) return;
     socket.connect();
     const handleProjectState = (data) => {
-      const incoming = data?.files || [];
-      const incomingBlockDocuments = Array.isArray(data?.blockDocuments) ? data.blockDocuments : [];
       const incomingTasks = Array.isArray(data?.tasks) ? data.tasks : [];
       const incomingVoice = Array.isArray(data?.voiceParticipants) ? data.voiceParticipants : [];
-      setFiles(incoming);
-      setBlockDocuments(incomingBlockDocuments);
+      setRemoteHubSession(data?.remoteHubSession || null);
+      setRemoteHubPendingRequests(
+        Array.isArray(data?.remoteHubPendingRequests) ? data.remoteHubPendingRequests : []
+      );
+      applyProjectTreeState(data);
       setTasks(incomingTasks);
       setVoiceParticipants(
         incomingVoice
@@ -1132,21 +1533,10 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
           .slice()
           .sort((a, b) => (a.user_name || "").localeCompare(b.user_name || ""))
       );
-      incoming.forEach((f) => {
-        const st = getCollabState(f.id);
-        if (!st) return;
-        st.rev = typeof f.rev === "number" ? f.rev : 0;
-        st.pending = null;
-        st.buffer = null;
-        st.inFlight = false;
-        st.opId = null;
-      });
-      if (!currentFileIdRef.current && incoming.length) {
-        setCurrentFileId(incoming[0].id);
-      }
-      if (!currentBlockDocumentId && incomingBlockDocuments.length) {
-        setCurrentBlockDocumentId(incomingBlockDocuments[0].id);
-      }
+    };
+
+    const handleProjectTreeUpdated = (data) => {
+      applyProjectTreeState(data);
     };
 
     const handleAck = (data) => {
@@ -1329,14 +1719,23 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         text: "A checkpoint was deleted",
       });
       setSnapshots((prev) => prev.filter((item) => item.id !== snapshotId));
+      setCheckpointInspectorSnapshot((prev) => (prev?.id === snapshotId ? null : prev));
+      setCheckpointInspection((prev) => (prev?.snapshot?.id === snapshotId ? null : prev));
     };
 
     const handleSnapshotRestored = (data) => {
       const snapshot = data?.snapshot;
       if (!snapshot || typeof snapshot.id !== "number") return;
+      const restoredByName = data?.restoredByName || "A teammate";
+      const updatedFiles = typeof data?.updatedFiles === "number" ? data.updatedFiles : null;
+      const restoredFileLabel =
+        updatedFiles == null ? "files" : `${updatedFiles} file${updatedFiles === 1 ? "" : "s"}`;
       pushActivity({
         kind: "checkpoint",
-        text: `${data?.restoredByName || "A teammate"} restored checkpoint: ${snapshot.name}`,
+        text:
+          data?.restoreScope === "partial"
+            ? `${restoredByName} restored ${restoredFileLabel} from checkpoint: ${snapshot.name}`
+            : `${restoredByName} restored checkpoint: ${snapshot.name}${updatedFiles == null ? "" : ` (${restoredFileLabel})`}`,
         userId: data?.restoredByUserId,
       });
       setSnapshots((prev) => {
@@ -1456,6 +1855,9 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       setError((prev) => (prev === "Realtime connection failed." ? "" : prev));
       setVoiceError("");
       emitCursorPresence();
+      if (project?.project_type === PROJECT_TYPE_PYBRICKS && pybricksHubStateRef.current?.connected) {
+        publishRemoteHubHostState(pybricksHubStateRef.current);
+      }
       if (voiceEnabledRef.current && localStreamRef.current) {
         clearVoiceConnections();
         socketRef.current?.emit("voice_join", { projectId: socketProjectId });
@@ -1483,12 +1885,162 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       ]);
     };
 
+    const handleRemoteHubState = (data) => {
+      const previousSession = remoteHubSessionRef.current;
+      const nextSession = data?.session || null;
+      const previouslyApprovedGuest = Boolean(
+        previousSession?.host?.userId !== user?.id &&
+          (previousSession?.guests || []).some((entry) => entry.userId === user?.id)
+      );
+      setRemoteHubSession(nextSession);
+      if (!nextSession) {
+        setRemoteHubPendingRequests([]);
+        if (previouslyApprovedGuest) {
+          setRunState("stopped");
+          setRemoteHubNotice("The remote hub session ended.");
+        }
+      }
+    };
+
+    const handleRemoteHubPendingRequests = (data) => {
+      setRemoteHubPendingRequests(Array.isArray(data?.requests) ? data.requests : []);
+    };
+
+    const handleRemoteHubRequestResolved = (data) => {
+      if (data?.approved) {
+        setRemoteHubNotice(`Remote hub access granted by ${data?.hostUserName || "your host"}.`);
+        return;
+      }
+      setRemoteHubNotice(`Remote hub access request declined by ${data?.hostUserName || "your host"}.`);
+    };
+
+    const handleRemoteHubAccessRevoked = (data) => {
+      setRemoteHubPendingRequests([]);
+      setRemoteHubNotice(`${data?.hostUserName || "The host"} removed your remote hub access.`);
+      setRunState("stopped");
+    };
+
+    const handleRemoteHubHostConflict = (data) => {
+      setError(data?.message || "Another collaborator is already hosting the project hub.");
+    };
+
+    const handleRemoteHubError = (data) => {
+      const message = normalizeTerminalText(data?.message, "Remote hub request failed.");
+      appendCompilerOutput(`[remote hub] ${message}\n`);
+    };
+
+    const handleRemoteHubExecuteRun = async (data) => {
+      if (!isPybricksProject) return;
+      const runner = runnerRef.current;
+      const runRequest = data?.runRequest;
+      if (!runner || !runRequest) return;
+
+      const requestedByUserName = data?.requestedByUserName || "A collaborator";
+      relayRemoteHubRunStarted({
+        fileName: runRequest.fileName || runMetaRef.current?.fileName || "unknown.py",
+        requestedByUserId: data?.requestedByUserId,
+        requestedByUserName,
+      });
+
+      setOutput("");
+      outputRef.current = "";
+      setAwaitingInput(false);
+      setInputPrompt("");
+      setStdinLine("");
+      setActiveRunReplayId(null);
+      const startedAt = Date.now();
+      runMetaRef.current = {
+        runId: null,
+        startedAt,
+        fileName: runRequest.fileName || "unknown.py",
+        capture: "",
+      };
+      appendCompilerOutput(`[remote hub] ${requestedByUserName} started a remote run.\n`);
+
+      try {
+        await runner.run(runRequest);
+        runMetaRef.current = {
+          ...runMetaRef.current,
+          runId: runner.currentRunId || null,
+        };
+        setRunning(true);
+        runningRef.current = true;
+      } catch (err) {
+        const runError =
+          normalizeTerminalText(err?.message, "") ||
+          normalizeTerminalText(err?.response?.data?.detail, "") ||
+          "Run failed";
+        appendCompilerOutput(`${runError}\n`);
+        relayRemoteHubRuntimeEvent("stderr", { data: `${runError}\n` });
+        relayRemoteHubRuntimeEvent("run_result", { runId: null, returnCode: 1 });
+        setRunState("stopped");
+        finalizeRunHistoryEntry({ runId: null, returnCode: 1 });
+      }
+    };
+
+    const handleRemoteHubExecuteStop = () => {
+      const runner = runnerRef.current;
+      if (!runner) return;
+      runner.stop().catch((err) => {
+        const stopError = normalizeTerminalText(err?.message, "Failed to stop run.");
+        appendCompilerOutput(`[compiler] ${stopError}\n`);
+        relayRemoteHubRuntimeEvent("stderr", { data: `[compiler] ${stopError}\n` });
+      });
+    };
+
+    const handleRemoteHubRunStarted = (data) => {
+      const currentSession = remoteHubSessionRef.current;
+      const amApprovedGuest = Boolean(
+        currentSession?.host?.userId !== user?.id &&
+          (currentSession?.guests || []).some((entry) => entry.userId === user?.id)
+      );
+      if (!amApprovedGuest) return;
+      setOutput("");
+      outputRef.current = "";
+      setAwaitingInput(false);
+      setInputPrompt("");
+      setStdinLine("");
+      setActiveRunReplayId(null);
+      const startedAt = Date.now();
+      runMetaRef.current = {
+        runId: null,
+        startedAt,
+        fileName: data?.fileName || "unknown.py",
+        capture: "",
+      };
+      appendCompilerOutput(
+        `[remote hub] ${data?.requestedByUserName || "A collaborator"} started ${data?.fileName || "a run"} on ${data?.hostUserName || "the host"}'s hub.\n`,
+      );
+      setTerminalOpen(true);
+    };
+
+    const handleRemoteHubRuntimeEvent = (data) => {
+      const currentSession = remoteHubSessionRef.current;
+      const amApprovedGuest = Boolean(
+        currentSession?.host?.userId !== user?.id &&
+          (currentSession?.guests || []).some((entry) => entry.userId === user?.id)
+      );
+      if (!amApprovedGuest) return;
+      if (data?.kind === "stdout" || data?.kind === "stderr") {
+        appendCompilerOutput(normalizeTerminalText(data?.data, ""));
+        return;
+      }
+      if (data?.kind === "status") {
+        setRunState(data?.state);
+        return;
+      }
+      if (data?.kind === "run_result") {
+        finalizeRunHistoryEntry({ runId: data?.runId || null, returnCode: data?.returnCode });
+      }
+    };
+
     socket.on("project_state", handleProjectState);
     socket.on("file_op", applyIncomingOp);
     socket.on("op_ack", handleAck);
     socket.on("op_reject", handleReject);
     socket.on("file_ops", handleFileOps);
     socket.on("file_sync", handleFileSync);
+    socket.on("project_tree_updated", handleProjectTreeUpdated);
     socket.on("presence", handlePresence);
     socket.on("task_created", handleTaskCreated);
     socket.on("task_updated", handleTaskUpdated);
@@ -1504,6 +2056,16 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     socket.on("voice_answer", handleVoiceAnswer);
     socket.on("voice_ice", handleVoiceIce);
     socket.on("session_chat", handleSessionChat);
+    socket.on("remote_hub_state", handleRemoteHubState);
+    socket.on("remote_hub_pending_requests", handleRemoteHubPendingRequests);
+    socket.on("remote_hub_request_resolved", handleRemoteHubRequestResolved);
+    socket.on("remote_hub_access_revoked", handleRemoteHubAccessRevoked);
+    socket.on("remote_hub_host_conflict", handleRemoteHubHostConflict);
+    socket.on("remote_hub_error", handleRemoteHubError);
+    socket.on("remote_hub_execute_run", handleRemoteHubExecuteRun);
+    socket.on("remote_hub_execute_stop", handleRemoteHubExecuteStop);
+    socket.on("remote_hub_run_started", handleRemoteHubRunStarted);
+    socket.on("remote_hub_runtime_event", handleRemoteHubRuntimeEvent);
     socket.on("connect", handleConnect);
     socket.on("connect_error", handleConnectError);
 
@@ -1514,6 +2076,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       socket.off("op_reject", handleReject);
       socket.off("file_ops", handleFileOps);
       socket.off("file_sync", handleFileSync);
+      socket.off("project_tree_updated", handleProjectTreeUpdated);
       socket.off("presence", handlePresence);
       socket.off("task_created", handleTaskCreated);
       socket.off("task_updated", handleTaskUpdated);
@@ -1529,6 +2092,16 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       socket.off("voice_answer", handleVoiceAnswer);
       socket.off("voice_ice", handleVoiceIce);
       socket.off("session_chat", handleSessionChat);
+      socket.off("remote_hub_state", handleRemoteHubState);
+      socket.off("remote_hub_pending_requests", handleRemoteHubPendingRequests);
+      socket.off("remote_hub_request_resolved", handleRemoteHubRequestResolved);
+      socket.off("remote_hub_access_revoked", handleRemoteHubAccessRevoked);
+      socket.off("remote_hub_host_conflict", handleRemoteHubHostConflict);
+      socket.off("remote_hub_error", handleRemoteHubError);
+      socket.off("remote_hub_execute_run", handleRemoteHubExecuteRun);
+      socket.off("remote_hub_execute_stop", handleRemoteHubExecuteStop);
+      socket.off("remote_hub_run_started", handleRemoteHubRunStarted);
+      socket.off("remote_hub_runtime_event", handleRemoteHubRuntimeEvent);
       socket.off("connect", handleConnect);
       socket.off("connect_error", handleConnectError);
       socket.disconnect();
@@ -1570,6 +2143,103 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     lastPongRef.current = Date.now();
   };
 
+  const finalizeRunHistoryEntry = ({ runId, returnCode }) => {
+    const finishedAt = Date.now();
+    const runCode = Number(returnCode);
+    const normalizedReturnCode = Number.isFinite(runCode) ? runCode : 1;
+    const meta = runMetaRef.current || {};
+    const startedAt =
+      Number.isFinite(meta.startedAt) && meta.startedAt > 0 && finishedAt >= meta.startedAt
+        ? meta.startedAt
+        : finishedAt;
+    const durationMs = finishedAt - startedAt;
+    const rawOutput =
+      typeof meta.capture === "string"
+        ? meta.capture
+        : outputRef.current || "";
+    const output =
+      rawOutput.length > RUN_HISTORY_OUTPUT_CHAR_LIMIT
+        ? rawOutput.slice(-RUN_HISTORY_OUTPUT_CHAR_LIMIT)
+        : rawOutput;
+    const outputWasTrimmed = output.length !== rawOutput.length;
+    const outputLineCount = output ? output.split(/\r?\n/).length : 0;
+    const outcome = describeRunOutcome(normalizedReturnCode);
+    const historyEntry = {
+      id: runId || `${finishedAt}-${Math.random().toString(36).slice(2, 8)}`,
+      runId: runId || null,
+      fileName: meta.fileName || "unknown.py",
+      returnCode: normalizedReturnCode,
+      statusTone: outcome.tone,
+      statusLabel: outcome.label,
+      durationMs,
+      finishedAt,
+      output,
+      outputChars: rawOutput.length,
+      outputLineCount,
+      outputWasTrimmed,
+    };
+    setRunHistory((prev) => [historyEntry, ...prev].slice(0, RUN_HISTORY_LIMIT));
+    setActiveRunReplayId(null);
+    runMetaRef.current = { runId: null, startedAt: 0, fileName: "", capture: null };
+  };
+
+  const setRunState = (state) => {
+    const nextRunning = state === "running";
+    setRunning(nextRunning);
+    runningRef.current = nextRunning;
+    if (!nextRunning) {
+      setAwaitingInput(false);
+      setInputPrompt("");
+    }
+  };
+
+  const publishRemoteHubHostState = (nextState) => {
+    if (!isPybricksProject || !socketRef.current) return;
+    const activeProjectId = projectApiIdRef.current;
+    const activeSocketProjectId = activeProjectId != null ? String(activeProjectId) : null;
+    if (!activeSocketProjectId) return;
+    const currentSession = remoteHubSessionRef.current;
+    const amHosting = currentSession?.host?.userId === user?.id;
+    if (!nextState?.connected && !amHosting) {
+      return;
+    }
+    socketRef.current.emit("remote_hub_host_state", {
+      projectId: activeSocketProjectId,
+      connected: Boolean(nextState?.connected),
+      deviceName: nextState?.deviceName || "",
+      transport: nextState?.transport || "",
+      transportLabel: nextState?.transportLabel || "",
+      hubRunning: Boolean(nextState?.hubRunning),
+    });
+  };
+
+  const relayRemoteHubRunStarted = ({ fileName, requestedByUserId, requestedByUserName }) => {
+    if (!isPybricksProject || !socketRef.current) return;
+    const activeProjectId = projectApiIdRef.current;
+    const activeSocketProjectId = activeProjectId != null ? String(activeProjectId) : null;
+    const currentSession = remoteHubSessionRef.current;
+    if (!activeSocketProjectId || currentSession?.host?.userId !== user?.id || !currentSession?.guests?.length) return;
+    socketRef.current.emit("remote_hub_run_started", {
+      projectId: activeSocketProjectId,
+      fileName,
+      requestedByUserId,
+      requestedByUserName,
+    });
+  };
+
+  const relayRemoteHubRuntimeEvent = (kind, payload = {}) => {
+    if (!isPybricksProject || !socketRef.current) return;
+    const activeProjectId = projectApiIdRef.current;
+    const activeSocketProjectId = activeProjectId != null ? String(activeProjectId) : null;
+    const currentSession = remoteHubSessionRef.current;
+    if (!activeSocketProjectId || currentSession?.host?.userId !== user?.id || !currentSession?.guests?.length) return;
+    socketRef.current.emit("remote_hub_runtime_event", {
+      projectId: activeSocketProjectId,
+      kind,
+      ...payload,
+    });
+  };
+
   useEffect(() => {
     if (!project?.project_type) {
       return undefined;
@@ -1595,6 +2265,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       onConnectionChange: (state) => {
         if (!active) return;
         setPybricksHubState(state);
+        publishRemoteHubHostState(state);
       },
       onReady: () => {
         if (!active) return;
@@ -1603,61 +2274,25 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       },
       onStatus: ({ state }) => {
         if (!active) return;
-        const nextRunning = state === "running";
-        setRunning(nextRunning);
-        runningRef.current = nextRunning;
-        if (!nextRunning) {
-          setAwaitingInput(false);
-          setInputPrompt("");
-        }
+        setRunState(state);
+        relayRemoteHubRuntimeEvent("status", { state });
       },
       onStdout: (data) => {
         if (!active) return;
-        appendCompilerOutput(normalizeTerminalText(data, ""));
+        const text = normalizeTerminalText(data, "");
+        appendCompilerOutput(text);
+        relayRemoteHubRuntimeEvent("stdout", { data: text });
       },
       onStderr: (data) => {
         if (!active) return;
-        appendCompilerOutput(normalizeTerminalText(data, ""));
+        const text = normalizeTerminalText(data, "");
+        appendCompilerOutput(text);
+        relayRemoteHubRuntimeEvent("stderr", { data: text });
       },
       onRunResult: ({ runId, returnCode }) => {
         if (!active) return;
-        const finishedAt = Date.now();
-        const runCode = Number(returnCode);
-        const normalizedReturnCode = Number.isFinite(runCode) ? runCode : 1;
-        const meta = runMetaRef.current || {};
-        const startedAt =
-          Number.isFinite(meta.startedAt) && meta.startedAt > 0 && finishedAt >= meta.startedAt
-            ? meta.startedAt
-            : finishedAt;
-        const durationMs = finishedAt - startedAt;
-        const rawOutput =
-          typeof meta.capture === "string"
-            ? meta.capture
-            : outputRef.current || "";
-        const output =
-          rawOutput.length > RUN_HISTORY_OUTPUT_CHAR_LIMIT
-            ? rawOutput.slice(-RUN_HISTORY_OUTPUT_CHAR_LIMIT)
-            : rawOutput;
-        const outputWasTrimmed = output.length !== rawOutput.length;
-        const outputLineCount = output ? output.split(/\r?\n/).length : 0;
-        const outcome = describeRunOutcome(normalizedReturnCode);
-        const historyEntry = {
-          id: runId || `${finishedAt}-${Math.random().toString(36).slice(2, 8)}`,
-          runId: runId || null,
-          fileName: meta.fileName || "unknown.py",
-          returnCode: normalizedReturnCode,
-          statusTone: outcome.tone,
-          statusLabel: outcome.label,
-          durationMs,
-          finishedAt,
-          output,
-          outputChars: rawOutput.length,
-          outputLineCount,
-          outputWasTrimmed,
-        };
-        setRunHistory((prev) => [historyEntry, ...prev].slice(0, RUN_HISTORY_LIMIT));
-        setActiveRunReplayId(null);
-        runMetaRef.current = { runId: null, startedAt: 0, fileName: "", capture: null };
+        finalizeRunHistoryEntry({ runId, returnCode });
+        relayRemoteHubRuntimeEvent("run_result", { runId, returnCode });
       },
       onError: (message) => {
         if (!active) return;
@@ -1676,13 +2311,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       },
       onStatus: ({ state }) => {
         if (!active) return;
-        const nextRunning = state === "running";
-        setRunning(nextRunning);
-        runningRef.current = nextRunning;
-        if (!nextRunning) {
-          setAwaitingInput(false);
-          setInputPrompt("");
-        }
+        setRunState(state);
       },
       onStdout: (data) => {
         if (!active) return;
@@ -1694,43 +2323,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       },
       onRunResult: ({ runId, returnCode }) => {
         if (!active) return;
-        const finishedAt = Date.now();
-        const runCode = Number(returnCode);
-        const normalizedReturnCode = Number.isFinite(runCode) ? runCode : 1;
-        const meta = runMetaRef.current || {};
-        const startedAt =
-          Number.isFinite(meta.startedAt) && meta.startedAt > 0 && finishedAt >= meta.startedAt
-            ? meta.startedAt
-            : finishedAt;
-        const durationMs = finishedAt - startedAt;
-        const rawOutput =
-          typeof meta.capture === "string"
-            ? meta.capture
-            : outputRef.current || "";
-        const output =
-          rawOutput.length > RUN_HISTORY_OUTPUT_CHAR_LIMIT
-            ? rawOutput.slice(-RUN_HISTORY_OUTPUT_CHAR_LIMIT)
-            : rawOutput;
-        const outputWasTrimmed = output.length !== rawOutput.length;
-        const outputLineCount = output ? output.split(/\r?\n/).length : 0;
-        const outcome = describeRunOutcome(normalizedReturnCode);
-        const historyEntry = {
-          id: runId || `${finishedAt}-${Math.random().toString(36).slice(2, 8)}`,
-          runId: runId || null,
-          fileName: meta.fileName || "unknown.py",
-          returnCode: normalizedReturnCode,
-          statusTone: outcome.tone,
-          statusLabel: outcome.label,
-          durationMs,
-          finishedAt,
-          output,
-          outputChars: rawOutput.length,
-          outputLineCount,
-          outputWasTrimmed,
-        };
-        setRunHistory((prev) => [historyEntry, ...prev].slice(0, RUN_HISTORY_LIMIT));
-        setActiveRunReplayId(null);
-        runMetaRef.current = { runId: null, startedAt: 0, fileName: "", capture: null };
+        finalizeRunHistoryEntry({ runId, returnCode });
       },
       onError: (message) => {
         if (!active) return;
@@ -1879,47 +2472,68 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
 
   const openCreateFileMenu = () => {
     if (!canEdit) return;
-    if (!isPybricksProject) {
-      createFile("text");
-      return;
-    }
     setSidebarOpen(true);
     setCreateFileMenuOpen((prev) => !prev);
   };
 
-  const createFile = async (kind) => {
+  const createFile = async (kind, parentPath = TREE_ROOT) => {
     if (!canEdit) return;
     if (!projectApiId) return;
-    if (kind !== "text" && kind !== "blocks") return;
+    if (kind !== "text" && kind !== "blocks" && kind !== "folder") return;
     if (kind === "blocks" && !isPybricksProject) return;
     setCreateFileMenuOpen(false);
-    const namePrompt = kind === "blocks" ? "Block file name" : "Text file name (e.g. utils.py)";
+    const namePrompt =
+      kind === "blocks" ? "Block file name" : kind === "folder" ? "Folder name" : "Text file name (e.g. utils.py)";
     const name = prompt(namePrompt);
     if (!name) return;
 
-    if (kind === "blocks") {
-      const res = await api.post(`/projects/${projectApiId}/block-documents`, { name });
-      setBlockDocuments((prev) => [...prev, res.data]);
-      setActiveEditorKind("blocks");
-      setCurrentBlockDocumentId(res.data.id);
-      if (!running) {
-        setTerminalOpen(false);
+    try {
+      if (kind === "folder") {
+        const res = await api.post(`/projects/${projectApiId}/folders`, { name, parent_path: parentPath || "" });
+        setFolders((prev) => upsertById(prev, res.data));
+        setExpandedFolders((prev) => ({ ...prev, [parentPath || TREE_ROOT]: true, [res.data.path]: true }));
+        if (isMobileViewport) {
+          setSidebarOpen(false);
+        }
+        return;
       }
-      return;
-    }
 
-    const res = await api.post(`/projects/${projectApiId}/files`, { name, content: `# ${name}\n` });
-    setFiles((prev) => [...prev, res.data]);
-    const st = getCollabState(res.data.id);
-    if (st) {
-      st.rev = 0;
-      st.pending = null;
-      st.buffer = null;
-      st.inFlight = false;
-      st.opId = null;
+      if (kind === "blocks") {
+        const res = await api.post(`/projects/${projectApiId}/block-documents`, { name });
+        setBlockDocuments((prev) => upsertById(prev, res.data));
+        setActiveEditorKind("blocks");
+        setCurrentBlockDocumentId(res.data.id);
+        if (!running) {
+          setTerminalOpen(false);
+        }
+        if (isMobileViewport) {
+          setSidebarOpen(false);
+        }
+        return;
+      }
+
+      const res = await api.post(`/projects/${projectApiId}/files`, {
+        name,
+        folder_path: parentPath || "",
+        content: `# ${name}\n`,
+      });
+      setFiles((prev) => upsertById(prev, res.data));
+      const st = getCollabState(res.data.id);
+      if (st) {
+        st.rev = 0;
+        st.pending = null;
+        st.buffer = null;
+        st.inFlight = false;
+        st.opId = null;
+      }
+      setCurrentFileId(res.data.id);
+      setActiveEditorKind("file");
+      if (isMobileViewport) {
+        setSidebarOpen(false);
+      }
+    } catch (err) {
+      setError(err.response?.data?.detail || "Could not create that item.");
     }
-    setCurrentFileId(res.data.id);
-    setActiveEditorKind("file");
   };
 
   const deleteFile = async (fileId) => {
@@ -1948,10 +2562,52 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const renameFile = async (file) => {
     if (!canEdit) return;
     if (!projectApiId) return;
-    const name = prompt("New name", file.name);
-    if (!name || name === file.name) return;
-    const res = await api.patch(`/projects/${projectApiId}/files/${file.id}`, { name });
-    setFiles((prev) => prev.map((f) => (f.id === file.id ? res.data : f)));
+    const currentName = treeBaseName(file.name);
+    const name = prompt("New name", currentName);
+    if (!name || name === currentName) return;
+    try {
+      const res = await api.patch(`/projects/${projectApiId}/files/${file.id}`, {
+        name,
+        folder_path: treeParentPath(file.name),
+      });
+      setFiles((prev) => upsertById(prev, res.data));
+    } catch (err) {
+      setError(err.response?.data?.detail || "Could not rename that file.");
+    }
+  };
+
+  const renameFolder = async (folder) => {
+    if (!canEdit) return;
+    if (!projectApiId || !folder?.id) return;
+    const currentName = treeBaseName(folder.path);
+    const name = prompt("New folder name", currentName);
+    if (!name || name === currentName) return;
+    try {
+      const res = await api.patch(`/projects/${projectApiId}/folders/${folder.id}`, {
+        name,
+        parent_path: treeParentPath(folder.path),
+      });
+      setFolders((prev) => upsertById(prev, res.data));
+    } catch (err) {
+      setError(err.response?.data?.detail || "Could not rename that folder.");
+    }
+  };
+
+  const deleteFolder = async (folder) => {
+    if (!canEdit) return;
+    if (!projectApiId || !folder?.id) return;
+    if (!confirm(`Delete folder "${treeBaseName(folder.path)}" and everything inside it?`)) return;
+    await api.delete(`/projects/${projectApiId}/folders/${folder.id}`);
+    const prefix = `${folder.path}/`;
+    setFolders((prev) => prev.filter((entry) => entry.id !== folder.id && !entry.path.startsWith(prefix)));
+    setFiles((prev) => {
+      const filtered = prev.filter((file) => !normalizeTreePath(file.name).startsWith(prefix));
+      if (currentFileId && !filtered.some((file) => file.id === currentFileId)) {
+        setCurrentFileId(filtered[0]?.id || null);
+        if (filtered[0]?.id) setActiveEditorKind("file");
+      }
+      return filtered;
+    });
   };
 
   const renameBlockDocument = async (document) => {
@@ -1959,8 +2615,12 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     if (!projectApiId) return;
     const name = prompt("New block file name", document.name);
     if (!name || name === document.name) return;
-    const res = await api.patch(`/projects/${projectApiId}/block-documents/${document.id}`, { name });
-    setBlockDocuments((prev) => prev.map((entry) => (entry.id === document.id ? res.data : entry)));
+    try {
+      const res = await api.patch(`/projects/${projectApiId}/block-documents/${document.id}`, { name });
+      setBlockDocuments((prev) => upsertById(prev, res.data));
+    } catch (err) {
+      setError(err.response?.data?.detail || "Could not rename that block file.");
+    }
   };
 
   const deleteBlockDocument = async (documentId) => {
@@ -1985,6 +2645,158 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       }
       return filtered;
     });
+  };
+
+  const toggleFolderExpanded = (path) => {
+    const normalized = normalizeTreePath(path);
+    setExpandedFolders((prev) => ({ ...prev, [normalized]: !(prev[normalized] ?? true) }));
+  };
+
+  const isFolderExpanded = (path) => expandedFolders[normalizeTreePath(path)] ?? true;
+
+  const handleTreeDragStart = (event, entry) => {
+    if (!canEdit) return;
+    if (entry.kind !== "file" && entry.kind !== "folder") return;
+    if (entry.kind === "folder" && !entry.id) return;
+    const payload = {
+      kind: entry.kind,
+      id: entry.id,
+      path: entry.path || entry.fullName || entry.name,
+      parentPath: entry.parentPath || TREE_ROOT,
+    };
+    draggingTreeEntryRef.current = payload;
+    setDraggingTreeEntry(payload);
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/json", JSON.stringify(payload));
+  };
+
+  const resolveTreeDropTarget = (event, entry) => {
+    const activeDrag = draggingTreeEntryRef.current || draggingTreeEntry;
+    if (!activeDrag) return null;
+    const bounds = event.currentTarget.getBoundingClientRect();
+    const ratio = bounds.height > 0 ? (event.clientY - bounds.top) / bounds.height : 0.5;
+
+    if (entry.kind === "folder") {
+      if (ratio < 0.25) {
+        return { mode: "before", parentPath: entry.parentPath || TREE_ROOT, targetKind: "folder", targetId: entry.id };
+      }
+      if (ratio > 0.75) {
+        return { mode: "after", parentPath: entry.parentPath || TREE_ROOT, targetKind: "folder", targetId: entry.id };
+      }
+      return { mode: "inside", parentPath: entry.path, targetKind: "folder", targetId: entry.id };
+    }
+
+    if (entry.kind === "file") {
+      return {
+        mode: ratio < 0.5 ? "before" : "after",
+        parentPath: entry.parentPath || TREE_ROOT,
+        targetKind: "file",
+        targetId: entry.id,
+      };
+    }
+
+    return null;
+  };
+
+  const isInvalidFolderDrop = (targetParentPath) => {
+    const activeDrag = draggingTreeEntryRef.current || draggingTreeEntry;
+    if (!activeDrag || activeDrag.kind !== "folder") return false;
+    const draggedPath = normalizeTreePath(activeDrag.path);
+    const targetPath = normalizeTreePath(targetParentPath);
+    return targetPath === draggedPath || targetPath.startsWith(`${draggedPath}/`);
+  };
+
+  const handleTreeDragOver = (event, entry) => {
+    const activeDrag = draggingTreeEntryRef.current || draggingTreeEntry;
+    if (!activeDrag) return;
+    const target = resolveTreeDropTarget(event, entry);
+    if (!target || isInvalidFolderDrop(target.parentPath)) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setTreeDropTarget(target);
+  };
+
+  const handleTreeRootDragOver = (event) => {
+    const activeDrag = draggingTreeEntryRef.current || draggingTreeEntry;
+    if (!activeDrag || isInvalidFolderDrop(TREE_ROOT)) return;
+    const item = event.target.closest?.(".es-file-tree-row");
+    if (item) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+    setTreeDropTarget({ mode: "inside", parentPath: TREE_ROOT, targetKind: "root", targetId: null });
+  };
+
+  const sameTreeItem = (entry, item) => entry?.kind === item?.kind && entry?.id === item?.id;
+
+  const handleTreeDrop = async (event) => {
+    event.preventDefault();
+    const activeDrag = draggingTreeEntryRef.current || draggingTreeEntry;
+    if (!canEdit || !projectApiId || !activeDrag || !treeDropTarget) {
+      draggingTreeEntryRef.current = null;
+      setDraggingTreeEntry(null);
+      setTreeDropTarget(null);
+      return;
+    }
+
+    const targetParentPath = normalizeTreePath(treeDropTarget.parentPath);
+    if (isInvalidFolderDrop(targetParentPath)) {
+      draggingTreeEntryRef.current = null;
+      setDraggingTreeEntry(null);
+      setTreeDropTarget(null);
+      return;
+    }
+    if (
+      treeDropTarget.mode !== "inside" &&
+      treeDropTarget.targetKind === activeDrag.kind &&
+      treeDropTarget.targetId === activeDrag.id
+    ) {
+      draggingTreeEntryRef.current = null;
+      setDraggingTreeEntry(null);
+      setTreeDropTarget(null);
+      return;
+    }
+
+    const currentSiblings = (treeEntriesByParent.get(targetParentPath || TREE_ROOT) || [])
+      .filter((entry) => (entry.kind === "file" || (entry.kind === "folder" && entry.id)))
+      .map((entry) => ({ kind: entry.kind, id: entry.id }));
+    const draggedItem = { kind: activeDrag.kind, id: activeDrag.id };
+    const nextSiblings = currentSiblings.filter((entry) => !sameTreeItem(entry, draggedItem));
+
+    if (treeDropTarget.mode === "inside") {
+      nextSiblings.push(draggedItem);
+    } else {
+      const targetIndex = nextSiblings.findIndex(
+        (entry) => entry.kind === treeDropTarget.targetKind && entry.id === treeDropTarget.targetId
+      );
+      const insertIndex =
+        targetIndex === -1 ? nextSiblings.length : treeDropTarget.mode === "before" ? targetIndex : targetIndex + 1;
+      nextSiblings.splice(insertIndex, 0, draggedItem);
+    }
+
+    try {
+      const res = await api.patch(`/projects/${projectApiId}/tree/move`, {
+        kind: activeDrag.kind,
+        id: activeDrag.id,
+        target_parent_path: targetParentPath,
+        ordered_siblings: nextSiblings,
+      });
+      applyProjectTreeState(res.data);
+      if (activeDrag.kind === "folder") {
+        setExpandedFolders((prev) => ({ ...prev, [targetParentPath || TREE_ROOT]: true }));
+      }
+    } catch (err) {
+      setError(err.response?.data?.detail || "Could not move that item.");
+    } finally {
+      draggingTreeEntryRef.current = null;
+      setDraggingTreeEntry(null);
+      setTreeDropTarget(null);
+    }
+  };
+
+  const handleTreeDragEnd = () => {
+    draggingTreeEntryRef.current = null;
+    setDraggingTreeEntry(null);
+    setTreeDropTarget(null);
   };
 
   const selectFile = (fileId) => {
@@ -2053,9 +2865,87 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     });
   };
 
+  const beginRunCapture = (fileName) => {
+    setOutput("");
+    outputRef.current = "";
+    setAwaitingInput(false);
+    setInputPrompt("");
+    setStdinLine("");
+    setActiveRunReplayId(null);
+    runMetaRef.current = {
+      runId: null,
+      startedAt: Date.now(),
+      fileName: fileName || "unknown.py",
+      capture: "",
+    };
+  };
+
+  const buildRunRequest = async () => {
+    if (!currentFile && !isBlockEditorActive) return null;
+
+    let runtimeFiles = files;
+    let entryFileId = currentFile?.id;
+    let entryFileName = currentFile?.name;
+    let entryFileContent;
+    let fileName = currentFile?.name || "unknown.py";
+
+    if (isBlockEditorActive && currentBlockDocument) {
+      entryFileId = currentBlockDocument.id * -1;
+      entryFileName = currentBlockDocument.generated_entry_module || "main.py";
+      entryFileContent = generatedBlockCodeRef.current || generatedBlockCode || "";
+      runtimeFiles = files.filter((file) => file.name !== entryFileName);
+      fileName = `${currentBlockDocument.name} / ${entryFileName}`;
+    } else if (currentFile) {
+      await flushEdits(currentFile.id);
+      const editorSnapshot = editorViewRef.current?.state.doc.toString();
+      runtimeFiles =
+        typeof editorSnapshot === "string"
+          ? files.map((file) => (file.id === currentFile.id ? { ...file, content: editorSnapshot } : file))
+          : files;
+    }
+
+    return {
+      entryFileId,
+      entryFileName,
+      entryFileContent,
+      files: runtimeFiles,
+      fileName,
+    };
+  };
+
   const runCode = async () => {
     if (!currentFile && !isBlockEditorActive) return;
     if (isPybricksProject && !canEdit) return;
+    setTerminalOpen(true);
+
+    if (isRemoteHubGuestMode) {
+      if (!socketRef.current || !socketProjectId) return;
+      try {
+        const runRequest = await buildRunRequest();
+        if (!runRequest) return;
+        setOutput("");
+        outputRef.current = "";
+        setAwaitingInput(false);
+        setInputPrompt("");
+        setStdinLine("");
+        setActiveRunReplayId(null);
+        appendCompilerOutput(
+          `[remote hub] Sent run request to ${remoteHubHost?.userName || "the host"}.\n`
+        );
+        socketRef.current.emit("remote_hub_run_request", {
+          projectId: socketProjectId,
+          runRequest,
+        });
+      } catch (err) {
+        const runError =
+          normalizeTerminalText(err?.message, "") ||
+          normalizeTerminalText(err?.response?.data?.detail, "") ||
+          "Run failed";
+        appendCompilerOutput(`[remote hub] ${runError}\n`);
+      }
+      return;
+    }
+
     const runner = runnerRef.current;
     if (!runner || !runtimeReady) {
       appendCompilerOutput(
@@ -2065,47 +2955,19 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       );
       return;
     }
+
     try {
-      let runtimeFiles = files;
-      let entryFileId = currentFile?.id;
-      let entryFileName = currentFile?.name;
-      let entryFileContent;
-      let runFileName = currentFile?.name || "unknown.py";
-
-      if (isBlockEditorActive && currentBlockDocument) {
-        entryFileId = currentBlockDocument.id * -1;
-        entryFileName = currentBlockDocument.generated_entry_module || "main.py";
-        entryFileContent = generatedBlockCodeRef.current || generatedBlockCode || "";
-        runtimeFiles = files.filter((file) => file.name !== entryFileName);
-        runFileName = `${currentBlockDocument.name} / ${entryFileName}`;
-      } else {
-        await flushEdits(currentFile.id);
-        const editorSnapshot = editorViewRef.current?.state.doc.toString();
-        runtimeFiles =
-          typeof editorSnapshot === "string"
-            ? files.map((f) => (f.id === currentFile.id ? { ...f, content: editorSnapshot } : f))
-            : files;
+      const runRequest = await buildRunRequest();
+      if (!runRequest) return;
+      beginRunCapture(runRequest.fileName);
+      if (isPybricksProject) {
+        relayRemoteHubRunStarted({
+          fileName: runRequest.fileName,
+          requestedByUserId: user?.id,
+          requestedByUserName: user?.display_name || user?.username || "Host",
+        });
       }
-
-      setOutput("");
-      outputRef.current = "";
-      setAwaitingInput(false);
-      setInputPrompt("");
-      setStdinLine("");
-      setActiveRunReplayId(null);
-      const startedAt = Date.now();
-      runMetaRef.current = {
-        runId: null,
-        startedAt,
-        fileName: runFileName,
-        capture: "",
-      };
-      await runner.run({
-        entryFileId,
-        entryFileName,
-        entryFileContent,
-        files: runtimeFiles,
-      });
+      await runner.run(runRequest);
       runMetaRef.current = {
         ...runMetaRef.current,
         runId: runner.currentRunId || null,
@@ -2118,6 +2980,10 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         normalizeTerminalText(err?.response?.data?.detail, "") ||
         "Run failed";
       appendCompilerOutput(`${runError}\n`);
+      if (isPybricksProject) {
+        relayRemoteHubRuntimeEvent("stderr", { data: `${runError}\n` });
+        relayRemoteHubRuntimeEvent("run_result", { runId: null, returnCode: 1 });
+      }
       setRunning(false);
       runningRef.current = false;
       runMetaRef.current = { runId: null, startedAt: 0, fileName: "", capture: null };
@@ -2125,6 +2991,12 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   };
 
   const stopCode = () => {
+    if (isRemoteHubGuestMode) {
+      if (!socketRef.current || !socketProjectId) return;
+      socketRef.current.emit("remote_hub_stop_request", { projectId: socketProjectId });
+      appendCompilerOutput("[remote hub] Stop request sent to the host.\n");
+      return;
+    }
     const runner = runnerRef.current;
     if (!runner) return;
     runner.stop().catch((err) => {
@@ -2135,7 +3007,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
 
   const connectPybricksHub = async (transport) => {
     const runner = runnerRef.current;
-    if (!runner || !isPybricksProject) return;
+    if (!runner || !isPybricksProject || !canConnectLocalPybricksHub) return;
     try {
       if (transport === "usb") {
         await runner.connectUsb();
@@ -2155,7 +3027,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
 
   const disconnectPybricksHub = async () => {
     const runner = runnerRef.current;
-    if (!runner || !isPybricksProject) return;
+    if (!runner || !isPybricksProject || !canConnectLocalPybricksHub) return;
     try {
       await runner.disconnect();
     } catch (err) {
@@ -2191,7 +3063,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   };
 
   const submitInputLine = () => {
-    if (!running) return;
+    if (!running || isRemoteHubGuestMode) return;
     const runner = runnerRef.current;
     if (!runner) return;
     const line = stdinLine;
@@ -2203,6 +3075,37 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     } else {
       appendCompilerOutput("\n[compiler] Failed to write stdin.\n");
     }
+  };
+
+  const requestRemoteHubAccess = () => {
+    if (
+      !socketRef.current ||
+      !socketProjectId ||
+      !remoteHubTakenByOther ||
+      remoteHubRequestPending ||
+      hasRemoteHubGuestAccess
+    ) {
+      return;
+    }
+    socketRef.current.emit("remote_hub_request_access", { projectId: socketProjectId });
+    setRemoteHubNotice(`Requested access to ${remoteHubHost?.userName || "the host"}'s hub.`);
+  };
+
+  const respondToRemoteHubRequest = (guestUserId, approved) => {
+    if (!socketRef.current || !socketProjectId || !isRemoteHubHost) return;
+    socketRef.current.emit("remote_hub_respond_request", {
+      projectId: socketProjectId,
+      guestUserId,
+      approved,
+    });
+  };
+
+  const revokeRemoteHubAccess = (guestUserId) => {
+    if (!socketRef.current || !socketProjectId || !isRemoteHubHost) return;
+    socketRef.current.emit("remote_hub_revoke_access", {
+      projectId: socketProjectId,
+      guestUserId,
+    });
   };
 
   const generateSharePin = async () => {
@@ -2285,9 +3188,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     if (creatingSnapshot) return;
     setCreatingSnapshot(true);
     try {
-      for (const file of files) {
-        await flushEdits(file.id);
-      }
+      await flushAllEdits();
       const name = snapshotDraft.trim();
       const res = await api.post(`/projects/${projectApiId}/snapshots`, { name: name || undefined });
       if (res.data) {
@@ -2304,16 +3205,62 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     }
   };
 
-  const restoreSnapshot = async (snapshot) => {
-    if (!canEdit || !snapshot?.id) return;
+  const closeCheckpointInspector = (force = false) => {
+    if (!force && restoringSnapshotId != null) return;
+    latestInspectRequestIdRef.current += 1;
+    setCheckpointInspectorSnapshot(null);
+    setCheckpointInspection(null);
+    setCheckpointInspectionError("");
+    setLoadingCheckpointInspection(false);
+  };
+
+  const inspectSnapshot = async (snapshot) => {
+    if (!projectApiId || !snapshot?.id) return;
+    const requestId = latestInspectRequestIdRef.current + 1;
+    latestInspectRequestIdRef.current = requestId;
+    setOpenSnapshotMenuId(null);
+    setCheckpointInspectorSnapshot(snapshot);
+    setCheckpointInspection(null);
+    setCheckpointInspectionError("");
+    setLoadingCheckpointInspection(true);
+    try {
+      await flushAllEdits();
+      if (requestId !== latestInspectRequestIdRef.current) return;
+      const res = await api.get(`/projects/${projectApiId}/snapshots/${snapshot.id}/inspect`);
+      if (requestId !== latestInspectRequestIdRef.current) return;
+      setCheckpointInspection(res.data || null);
+      if (res.data?.snapshot) {
+        setCheckpointInspectorSnapshot(res.data.snapshot);
+      }
+    } catch (err) {
+      if (requestId !== latestInspectRequestIdRef.current) return;
+      setCheckpointInspectionError(err.response?.data?.detail || "Failed to inspect checkpoint.");
+    } finally {
+      if (requestId !== latestInspectRequestIdRef.current) return;
+      setLoadingCheckpointInspection(false);
+    }
+  };
+
+  const restoreSnapshot = async (snapshot, options = {}) => {
+    if (!canEdit || !snapshot?.id || restoringSnapshotId === snapshot.id) return;
     if (!projectApiId) return;
-    if (!confirm(`Restore checkpoint "${snapshot.name}"? This will overwrite matching files.`)) return;
     setRestoringSnapshotId(snapshot.id);
     try {
-      for (const file of files) {
-        await flushEdits(file.id);
-      }
-      await api.post(`/projects/${projectApiId}/snapshots/${snapshot.id}/restore`);
+      await flushAllEdits();
+      const fileNames = Array.isArray(options.fileNames) ? options.fileNames.filter(Boolean) : [];
+      const isPartialRestore = fileNames.length > 0;
+      const payload = isPartialRestore
+        ? {
+            file_names: fileNames,
+            allow_added_file_deletions: Boolean(options.allowAddedFileDeletions),
+            create_safety_snapshot: false,
+          }
+        : {
+            create_safety_snapshot: true,
+            safety_snapshot_name: `Before restoring checkpoint: ${snapshot.name}`,
+          };
+      await api.post(`/projects/${projectApiId}/snapshots/${snapshot.id}/restore`, payload);
+      closeCheckpointInspector(true);
     } catch (err) {
       setError(err.response?.data?.detail || "Failed to restore checkpoint.");
     } finally {
@@ -2321,13 +3268,30 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     }
   };
 
+  const restoreSelectedSnapshotFiles = async (snapshot, fileNames, options = {}) => {
+    if (!Array.isArray(fileNames) || fileNames.length === 0) return;
+    await restoreSnapshot(snapshot, {
+      fileNames,
+      allowAddedFileDeletions: Boolean(options.allowAddedFileDeletions),
+    });
+  };
+
+  const refreshCheckpointInspector = async () => {
+    if (!checkpointInspectorSnapshot?.id) return;
+    await inspectSnapshot(checkpointInspectorSnapshot);
+  };
+
   const removeSnapshot = async (snapshotId) => {
     if (!canEdit || !snapshotId) return;
     if (!projectApiId) return;
     if (!confirm("Delete this checkpoint?")) return;
+    setOpenSnapshotMenuId(null);
     try {
       await api.delete(`/projects/${projectApiId}/snapshots/${snapshotId}`);
       setSnapshots((prev) => prev.filter((entry) => entry.id !== snapshotId));
+      if (checkpointInspectorSnapshot?.id === snapshotId) {
+        closeCheckpointInspector();
+      }
     } catch (err) {
       setError(err.response?.data?.detail || "Failed to delete checkpoint.");
     }
@@ -2341,14 +3305,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       const res = await api.get(`/projects/${projectApiId}/snapshots/${snapshot.id}/export`, {
         responseType: "blob",
       });
-      const downloadUrl = window.URL.createObjectURL(res.data);
-      const link = document.createElement("a");
-      link.href = downloadUrl;
-      link.download = checkpointArchiveFileName(project?.name, snapshot.name);
-      document.body.appendChild(link);
-      link.click();
-      link.remove();
-      window.setTimeout(() => window.URL.revokeObjectURL(downloadUrl), 0);
+      downloadBlob(res.data, checkpointArchiveFileName(project?.name, snapshot.name));
     } catch (err) {
       let message = "Failed to export checkpoint.";
       if (err.response?.data instanceof Blob) {
@@ -2364,6 +3321,32 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       setError(message);
     } finally {
       setExportingSnapshotId(null);
+    }
+  };
+
+  const exportProjectBundle = async () => {
+    if (!projectApiId || exportingProjectBundle) return;
+    setExportingProjectBundle(true);
+    try {
+      const res = await api.get(`/projects/${projectApiId}/export`, {
+        responseType: "blob",
+      });
+      downloadBlob(res.data, projectBundleFileName(project?.name));
+    } catch (err) {
+      let message = "Failed to export project.";
+      if (err.response?.data instanceof Blob) {
+        try {
+          const payload = JSON.parse(await err.response.data.text());
+          message = payload?.detail || message;
+        } catch {
+          // Fall back to the generic message when the error body is not JSON.
+        }
+      } else {
+        message = err.response?.data?.detail || message;
+      }
+      setError(message);
+    } finally {
+      setExportingProjectBundle(false);
     }
   };
 
@@ -2396,9 +3379,17 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       const key = event.key.toLowerCase();
       const hasPrimaryModifier = event.metaKey || event.ctrlKey;
       const isQuickSearch = hasPrimaryModifier && !event.shiftKey && key === "k";
+      const isProjectSearch = hasPrimaryModifier && !event.shiftKey && key === "f";
       const isToggleSidebar = hasPrimaryModifier && event.shiftKey && key === "s";
       const isRunShortcut = (hasPrimaryModifier && key === "enter") || event.key === "F5";
       const isStopShortcut = event.key === "F6";
+
+      if (isProjectSearch) {
+        event.preventDefault();
+        setCommandPaletteOpen(false);
+        setProjectSearchOpen(true);
+        return;
+      }
 
       if (isQuickSearch) {
         event.preventDefault();
@@ -2429,6 +3420,39 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     return () => window.removeEventListener("keydown", handleShortcuts);
   }, [runCode, stopCode]);
 
+  useEffect(() => {
+    const selection = pendingSearchSelectionRef.current;
+    if (!selection || selection.fileId !== currentFileId || !editorViewRef.current) return;
+    pendingSearchSelectionRef.current = null;
+    requestAnimationFrame(() => {
+      const view = editorViewRef.current;
+      if (!view) return;
+      const from = Math.min(selection.from, view.state.doc.length);
+      const to = Math.min(selection.to, view.state.doc.length);
+      view.dispatch({ selection: { anchor: from, head: to }, scrollIntoView: true });
+      view.focus();
+    });
+  }, [currentFileId]);
+
+  const openProjectSearchResult = (result) => {
+    if (!result) return;
+    pendingSearchSelectionRef.current = result;
+    setActiveEditorKind("file");
+    setCurrentFileId(result.fileId);
+    if (result.fileId === currentFileIdRef.current && editorViewRef.current) {
+      const view = editorViewRef.current;
+      pendingSearchSelectionRef.current = null;
+      const docLen = view.state.doc.length;
+      const safeFrom = Math.max(0, Math.min(result.from, docLen));
+      const safeTo = Math.max(0, Math.min(result.to, docLen));
+      view.dispatch({
+        selection: { anchor: safeFrom, head: safeTo },
+        scrollIntoView: true,
+      });
+      view.focus();
+    }
+  };
+
   // --- Session Chat (ephemeral) ---
   const sendSessionChatMessage = () => {
     const msg = sessionChatInput.trim();
@@ -2444,7 +3468,12 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     runtimeApiBase: API_BASE,
   });
   const extensions = useMemo(
-    () => [python(), ...pythonIntelligenceExtensions, EditorView.lineWrapping, remoteCursorField],
+    () => [
+      python(),
+      ...pythonIntelligenceExtensions,
+      EditorView.lineWrapping,
+      remoteCursorField,
+    ],
     [pythonIntelligenceExtensions]
   );
 
@@ -2485,24 +3514,26 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     });
     return mapping;
   }, [visibleBlockDocuments]);
-  const filteredEditorEntries = useMemo(() => {
-    const query = fileSearch.trim().toLowerCase();
-    return [
-      ...visibleBlockDocuments.map((document) => ({
-        kind: "blocks",
-        id: document.id,
-        key: `blocks-${document.id}`,
-        name: document.name,
-        generatedEntryModule: document.generated_entry_module || "main.py",
-      })),
-      ...files.map((file) => ({
-        kind: "file",
-        id: file.id,
-        key: `file-${file.id}`,
-        name: file.name,
-      })),
-    ].filter((entry) => !query || entry.name.toLowerCase().includes(query));
-  }, [fileSearch, files, visibleBlockDocuments]);
+  const editorTree = useMemo(
+    () => buildEditorTree({ files, folders, blockDocuments: visibleBlockDocuments, query: fileSearch }),
+    [fileSearch, files, folders, visibleBlockDocuments]
+  );
+  const filteredEditorEntries = editorTree.root?.children || [];
+  const treeEntriesByParent = editorTree.entriesByParent;
+  const flattenedEditorEntries = useMemo(() => {
+    const entries = [];
+    const walk = (items) => {
+      items.forEach((entry) => {
+        if (entry.kind === "folder") {
+          walk(entry.children || []);
+          return;
+        }
+        entries.push(entry);
+      });
+    };
+    walk(filteredEditorEntries);
+    return entries;
+  }, [filteredEditorEntries]);
   const followTarget = useMemo(
     () => (presence || []).find((person) => person.user_id === followTargetId) || null,
     [presence, followTargetId]
@@ -2517,30 +3548,58 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const isTextFileActive = (fileId) => activeEditorKind === "file" && currentFileId === fileId;
   const isBlockFileActive = (documentId) => isBlockEditorActive && currentBlockDocumentId === documentId;
   const isEditorEntryActive = (entry) =>
-    entry.kind === "blocks" ? isBlockFileActive(entry.id) : isTextFileActive(entry.id);
+    entry.kind === "blocks" ? isBlockFileActive(entry.id) : entry.kind === "file" ? isTextFileActive(entry.id) : false;
+  const openEditorEntry = (entry) => {
+    if (!entry) return;
+    if (entry.kind === "blocks") {
+      selectBlockDocument(entry.id);
+    } else if (entry.kind === "file") {
+      selectFile(entry.id);
+    } else {
+      return;
+    }
+    if (isMobileViewport) {
+      setActiveSidebarScreen("");
+      setCreateFileMenuOpen(false);
+      setSidebarOpen(false);
+    }
+  };
   const stdinPlaceholder =
-    !running
+    isRemoteHubGuestMode
+      ? "Remote hub stdin is host-only"
+      : !running
       ? "Run code first"
       : awaitingInput && inputPrompt
       ? inputPrompt
       : "Type input and press Enter";
   const recentActivity = activityFeed.slice(0, 24);
+  const workspaceActivity = recentActivity;
+  const sidebarPresencePreview = (presence || []).slice(0, 3);
+  const sidebarPresenceOverflow = Math.max(0, presence.length - sidebarPresencePreview.length);
+  const doneTaskCount = Math.max(0, tasks.length - openTaskCount);
   const voiceParticipantCount = voiceParticipants.length;
-  const voiceByUserId = useMemo(() => {
-    const map = new Map();
-    voiceParticipants.forEach((participant) => {
-      if (typeof participant?.user_id === "number" && !map.has(participant.user_id)) {
-        map.set(participant.user_id, participant);
-      }
-    });
-    return map;
-  }, [voiceParticipants]);
   const commandPaletteItems = useMemo(() => {
     const query = commandPaletteQuery.trim().toLowerCase();
     const compact = (value, max = 44) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
     const matches = (value = "") => !query || value.toLowerCase().includes(query);
 
     const commandItems = [
+      ...(!isViewerMode
+        ? [
+            {
+              key: "cmd-files",
+              title: "Open files and project tools",
+              subtitle: "Show files, collaborators, tasks, checkpoints, export, and sharing",
+              badge: "Workspace",
+              icon: <FiMenu size={14} />,
+              onSelect: () => {
+                setActiveSidebarScreen("");
+                setCreateFileMenuOpen(false);
+                setSidebarOpen(true);
+              },
+            },
+          ]
+        : []),
       {
         key: "cmd-run",
         title: "Run current file",
@@ -2565,6 +3624,18 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         icon: <FiTerminal size={14} />,
         onSelect: () => setTerminalOpen((prev) => !prev),
       },
+      ...(!isViewerMode
+        ? [
+            {
+              key: "cmd-chat",
+              title: sessionChatOpen ? "Hide session chat" : "Open session chat",
+              subtitle: "Talk with collaborators in this editing session",
+              badge: "Team",
+              icon: <FiMessageSquare size={14} />,
+              onSelect: () => setSessionChatOpen((prev) => !prev),
+            },
+          ]
+        : []),
       {
         key: "cmd-run-history",
         title: runHistoryOpen ? "Hide run timeline" : "Show run timeline",
@@ -2584,6 +3655,68 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         icon: <FiTrash2 size={14} />,
         onSelect: () => clearTerminal(),
       },
+      ...(isBlockEditorActive
+        ? [
+            {
+              key: "cmd-generated-code",
+              title: showGeneratedBlockCode ? "Hide generated Python" : "View generated Python",
+              subtitle: "Toggle the Python generated by the block workspace",
+              badge: "Blocks",
+              icon: <FiCode size={14} />,
+              onSelect: () => setShowGeneratedBlockCode((prev) => !prev),
+            },
+          ]
+        : []),
+      ...(isPybricksProject && !isViewerMode && canConnectLocalPybricksHub
+        ? [
+            {
+              key: "cmd-pybricks-hub",
+              title: pybricksHubState.connected ? "Disconnect PyBricks hub" : "Connect PyBricks hub",
+              subtitle: pybricksHubState.connected
+                ? `${pybricksHubState.transportLabel || "Hub"} is connected`
+                : runtimeReady
+                  ? "Choose Bluetooth or wired transport"
+                  : "Compiler is still loading",
+              badge: pybricksHubState.connected ? "Connected" : "Hub",
+              icon: pybricksHubState.connected ? <FiWifi size={14} /> : <FiWifiOff size={14} />,
+              onSelect: () => {
+                if (pybricksConnectionBusy || !runtimeReady) return;
+                if (pybricksHubState.connected) {
+                  disconnectPybricksHub();
+                  return;
+                }
+                setPybricksConnectModalOpen(true);
+              },
+            },
+          ]
+        : []),
+      ...(canEdit
+        ? [
+            {
+              key: "cmd-voice-call",
+              title: voiceEnabled ? "Leave voice call" : "Join voice call",
+              subtitle: voiceEnabled ? "Disconnect from the collaborator voice room" : "Start voice with collaborators",
+              badge: voiceParticipantCount ? `${voiceParticipantCount} in call` : "Voice",
+              icon: voiceEnabled ? <FiPhoneOff size={14} /> : <FiPhoneCall size={14} />,
+              onSelect: () => {
+                if (voiceJoining) return;
+                voiceEnabled ? leaveVoiceCall() : joinVoiceCall();
+              },
+            },
+            ...(voiceEnabled
+              ? [
+                  {
+                    key: "cmd-voice-panel",
+                    title: voicePanelOpen ? "Hide call controls" : "Show call controls",
+                    subtitle: "Open mute and participant controls",
+                    badge: "Voice",
+                    icon: <FiUsers size={14} />,
+                    onSelect: () => setVoicePanelOpen((prev) => !prev),
+                  },
+                ]
+              : []),
+          ]
+        : []),
       {
         key: "cmd-dashboard",
         title: "Back to dashboard",
@@ -2614,14 +3747,14 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         : []),
     ]
       .filter((item) => matches(`${item.title} ${item.subtitle} ${item.badge || ""}`))
-      .slice(0, 10);
+      .slice(0, 14);
 
-    const fileItems = filteredEditorEntries
-      .filter((entry) => matches(entry.name))
+    const fileItems = flattenedEditorEntries
+      .filter((entry) => matches(entry.fullName || entry.name))
       .slice(0, 14)
       .map((entry) => ({
         key: entry.key,
-        title: `Open ${entry.kind === "blocks" ? "block file" : "file"}: ${entry.name}`,
+        title: `Open ${entry.kind === "blocks" ? "block file" : "file"}: ${entry.fullName || entry.name}`,
         subtitle:
           entry.kind === "blocks"
             ? isBlockFileActive(entry.id)
@@ -2632,8 +3765,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
               : "Switch editor focus",
         badge: entry.kind === "blocks" ? "Blocks" : "File",
         icon: entry.kind === "blocks" ? <FiZap size={14} /> : <FiFile size={14} />,
-        onSelect: () =>
-          entry.kind === "blocks" ? selectBlockDocument(entry.id) : selectFile(entry.id),
+        onSelect: () => openEditorEntry(entry),
       }));
 
     const taskItems = canEdit
@@ -2650,19 +3782,17 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
           }))
       : [];
 
-    const snapshotItems = canEdit
-      ? sortedSnapshots
-          .filter((snapshot) => matches(snapshot.name || "checkpoint"))
-          .slice(0, 6)
-          .map((snapshot) => ({
-            key: `snapshot-${snapshot.id}`,
-            title: `Restore checkpoint: ${compact(snapshot.name || "Untitled")}`,
-            subtitle: "Restore files from this checkpoint",
-            badge: "Checkpoint",
-            icon: <FiRefreshCw size={14} />,
-            onSelect: () => restoreSnapshot(snapshot),
-          }))
-      : [];
+    const snapshotItems = sortedSnapshots
+      .filter((snapshot) => matches(snapshot.name || "checkpoint"))
+      .slice(0, 6)
+      .map((snapshot) => ({
+        key: `snapshot-${snapshot.id}`,
+        title: `Inspect checkpoint: ${compact(snapshot.name || "Untitled")}`,
+        subtitle: canEdit ? "Preview diffs and restore files" : "Preview diffs",
+        badge: "Checkpoint",
+        icon: <FiRefreshCw size={14} />,
+        onSelect: () => inspectSnapshot(snapshot),
+      }));
 
     return [...commandItems, ...fileItems, ...taskItems, ...snapshotItems];
   }, [
@@ -2673,15 +3803,30 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     runHistoryOpen,
     runHistory.length,
     canEdit,
+    isViewerMode,
+    sessionChatOpen,
     files,
     currentFileId,
     activeEditorKind,
     isPybricksProject,
+    showGeneratedBlockCode,
+    canConnectLocalPybricksHub,
+    pybricksHubState.connected,
+    pybricksHubState.transportLabel,
+    runtimeReady,
+    pybricksConnectionBusy,
+    voiceEnabled,
+    voiceParticipantCount,
+    voiceJoining,
+    voicePanelOpen,
     sortedTasks,
     sortedSnapshots,
     runCode,
     stopCode,
     clearTerminal,
+    disconnectPybricksHub,
+    joinVoiceCall,
+    leaveVoiceCall,
     navigate,
     createFile,
     openCreateFileMenu,
@@ -2690,8 +3835,8 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     selectFile,
     selectBlockDocument,
     toggleTask,
-    restoreSnapshot,
-    filteredEditorEntries,
+    inspectSnapshot,
+    flattenedEditorEntries,
     isBlockEditorActive,
   ]);
 
@@ -2701,21 +3846,541 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       minute: "2-digit",
     });
 
-  const activityIcon = (kind) => {
-    if (kind === "edit") return <FiCode size={12} />;
-    if (kind === "task") return <FiCheck size={12} />;
-    if (kind === "checkpoint") return <FiCopy size={12} />;
-    if (kind === "presence") return <FiUsers size={12} />;
-    return <FiActivity size={12} />;
-  };
-
   const jumpToActivity = (activity) => {
     if (!activity?.fileId) return;
     selectFile(activity.fileId);
   };
 
+  const openSidebarScreen = (screen) => {
+    setCreateFileMenuOpen(false);
+    setActiveSidebarScreen(screen);
+  };
+
+  const renderSidebarAvatar = (person, className = "es-presence-avatar") => {
+    const name = person?.name || "User";
+    if (person?.avatar) {
+      return (
+        <img
+          src={resolveHostedAssetUrl(person.avatar)}
+          className={className}
+          alt={name}
+        />
+      );
+    }
+    return (
+      <span className={`${className} fallback`} style={{ background: person?.color || "var(--primary)" }}>
+        {name.charAt(0).toUpperCase()}
+      </span>
+    );
+  };
+
+  const renderTaskDetails = () => (
+    <>
+      <div className="es-task-detail-toolbar">
+        <button
+          type="button"
+          className={`es-task-filter ${showOnlyMyTasks ? "active" : ""}`}
+          onClick={() => setShowOnlyMyTasks((prev) => !prev)}
+        >
+          {showOnlyMyTasks ? `Mine (${myTaskCount})` : "All tasks"}
+        </button>
+        <span className="es-badge">{openTaskCount} open</span>
+      </div>
+      {canEdit && (
+        <div className="es-task-compose">
+          <input
+            className="es-task-input"
+            type="text"
+            value={taskDraft}
+            maxLength={240}
+            placeholder="Add a collaboration task..."
+            onChange={(event) => setTaskDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                addTask();
+              }
+            }}
+            disabled={savingTask}
+          />
+          <button type="button" className="es-task-add" onClick={addTask} disabled={savingTask || !taskDraft.trim()}>
+            <FiPlus size={13} />
+          </button>
+        </div>
+      )}
+      <div className="es-task-list">
+        {visibleTasks.map((task) => (
+          <div key={task.id} className={`es-task-item ${task.is_done ? "done" : ""}`}>
+            <button type="button" className="es-task-toggle" onClick={() => toggleTask(task)} disabled={!canEdit}>
+              {task.is_done ? <FiCheck size={12} /> : <FiSquare size={12} />}
+            </button>
+            <div className="es-task-main">
+              <span className="es-task-content">{task.content}</span>
+              <span className="es-task-meta">
+                {task.is_done ? `Done by ${task.completed_by_name || "team"}` : `Added by ${task.created_by_name || "team"}`}
+                {task.assigned_to_name ? ` · Assigned to ${task.assigned_to_name}` : " · Unassigned"}
+              </span>
+            </div>
+            {canEdit && (
+              <div className="es-task-row-actions">
+                <button
+                  type="button"
+                  className={`es-task-assign ${task.assigned_to_user_id === user?.id ? "active" : ""}`}
+                  onClick={() => toggleTaskOwnership(task)}
+                  title={task.assigned_to_user_id === user?.id ? "Release task" : "Take task"}
+                >
+                  {task.assigned_to_user_id === user?.id ? "Release" : "Take"}
+                </button>
+                <button type="button" className="es-task-delete" onClick={() => removeTask(task.id)} title="Delete task">
+                  <FiTrash2 size={11} />
+                </button>
+              </div>
+            )}
+          </div>
+        ))}
+        {visibleTasks.length === 0 && (
+          <div className="es-empty">
+            {showOnlyMyTasks ? "No assigned tasks in your focus list." : "No tasks yet. Add the first one."}
+          </div>
+        )}
+      </div>
+    </>
+  );
+
+  const renderCheckpointDetails = () => (
+    <>
+      {canEdit && (
+        <div className="es-snapshot-compose">
+          <input
+            className="es-snapshot-input"
+            type="text"
+            value={snapshotDraft}
+            maxLength={120}
+            placeholder="Checkpoint name (optional)"
+            onChange={(event) => setSnapshotDraft(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                createSnapshot();
+              }
+            }}
+            disabled={creatingSnapshot}
+          />
+          <button
+            type="button"
+            className="es-snapshot-add"
+            onClick={createSnapshot}
+            disabled={creatingSnapshot}
+            title="Create checkpoint"
+          >
+            {creatingSnapshot ? "..." : "Save"}
+          </button>
+        </div>
+      )}
+      <div className="es-snapshot-list">
+        {sortedSnapshots.map((snapshot) => (
+          <div key={snapshot.id} className="es-snapshot-item">
+            <button
+              type="button"
+              className="es-snapshot-main"
+              onClick={() => inspectSnapshot(snapshot)}
+              title={`Inspect checkpoint ${snapshot.name}`}
+            >
+              <span className="es-snapshot-name">{snapshot.name}</span>
+              <span className="es-snapshot-meta">
+                {snapshot.created_by_name || "Team"} · {snapshot.file_count || 0} files ·{" "}
+                {snapshot.created_at
+                  ? new Date(snapshot.created_at).toLocaleString([], {
+                      month: "short",
+                      day: "numeric",
+                      hour: "2-digit",
+                      minute: "2-digit",
+                    })
+                  : "Unknown time"}
+              </span>
+            </button>
+            <div className="es-snapshot-actions">
+              <button
+                type="button"
+                className="es-snapshot-menu-trigger"
+                onClick={() => setOpenSnapshotMenuId((prev) => (prev === snapshot.id ? null : snapshot.id))}
+                aria-label={`Checkpoint actions for ${snapshot.name}`}
+                aria-expanded={openSnapshotMenuId === snapshot.id}
+                title="Checkpoint actions"
+              >
+                <FiMoreVertical size={14} />
+              </button>
+              {openSnapshotMenuId === snapshot.id && (
+                <div className="es-snapshot-menu" role="menu">
+                  <button type="button" className="es-snapshot-menu-item" onClick={() => inspectSnapshot(snapshot)}>
+                    View changes
+                  </button>
+                  <button
+                    type="button"
+                    className="es-snapshot-menu-item"
+                    onClick={() => exportSnapshot(snapshot)}
+                    disabled={!projectApiId || exportingSnapshotId === snapshot.id}
+                  >
+                    {exportingSnapshotId === snapshot.id ? "Exporting..." : "Export"}
+                  </button>
+                  {canEdit && (
+                    <button type="button" className="es-snapshot-menu-item danger" onClick={() => removeSnapshot(snapshot.id)}>
+                      Delete
+                    </button>
+                  )}
+                </div>
+              )}
+            </div>
+          </div>
+        ))}
+        {sortedSnapshots.length === 0 && <div className="es-empty">No checkpoints yet.</div>}
+      </div>
+    </>
+  );
+
+  const formatWorkspaceLocation = (person) => {
+    if (Number.isInteger(person?.block_presence?.documentId)) {
+      return `editing ${blockDocumentNameById.get(person.block_presence.documentId) || "a block file"}`;
+    }
+    if (typeof person?.cursor?.fileId === "number") {
+      return `editing ${fileNameById.get(person.cursor.fileId) || "an untitled file"}`;
+    }
+    return "online in workspace";
+  };
+
+  const renderWorkspacePanel = () => (
+    <div className="es-workspace-card">
+      <div className="es-workspace-title">Workspace</div>
+      <div className="es-workspace-people">
+        {(presence || []).slice(0, 3).map((person) => {
+          const isSessionHost = remoteHubHost?.userId === person.user_id;
+          const hasGuestAccess = Boolean(
+            (remoteHubSession?.guests || []).some((entry) => entry.userId === person.user_id)
+          );
+
+          return (
+            <div className="es-workspace-row" key={person.user_id}>
+              {renderSidebarAvatar(person, "es-workspace-avatar")}
+              <span className="es-workspace-main">
+                <span className="es-workspace-name">{person.name}</span>
+                <span className="es-workspace-meta">{formatWorkspaceLocation(person)}</span>
+                {isPybricksProject && isSessionHost && (
+                  <span className="es-workspace-hub-status">
+                    <FiWifi size={11} />
+                    {person.user_id === user?.id
+                      ? `Hosting ${remoteHubHost?.deviceName || "LEGO Hub"}`
+                      : `Connected to ${remoteHubHost?.deviceName || "LEGO Hub"}`}
+                  </span>
+                )}
+                {isPybricksProject && hasGuestAccess && !isSessionHost && (
+                  <span className="es-workspace-hub-status">
+                    <FiZap size={11} />
+                    Remote hub access
+                  </span>
+                )}
+              </span>
+              <span className="es-workspace-actions">
+                {isPybricksProject &&
+                  isSessionHost &&
+                  person.user_id !== user?.id &&
+                  !hasRemoteHubGuestAccess &&
+                  !remoteHubRequestPending &&
+                  !isRemoteHubHost && (
+                    <button type="button" className="es-workspace-action" onClick={requestRemoteHubAccess}>
+                      Join Hub
+                    </button>
+                  )}
+                {isPybricksProject &&
+                  isSessionHost &&
+                  person.user_id !== user?.id &&
+                  remoteHubRequestPending &&
+                  !hasRemoteHubGuestAccess &&
+                  !isRemoteHubHost && <span className="es-workspace-action-label">Pending</span>}
+                {isPybricksProject && isRemoteHubHost && hasGuestAccess && person.user_id !== user?.id && (
+                  <button
+                    type="button"
+                    className="es-workspace-action danger"
+                    onClick={() => revokeRemoteHubAccess(person.user_id)}
+                  >
+                    Remove
+                  </button>
+                )}
+                <span className="es-workspace-dot" />
+              </span>
+            </div>
+          );
+        })}
+        {presence.length === 0 && (
+          <div className="es-workspace-row">
+            {renderSidebarAvatar({ name: user?.display_name || user?.username || "You" }, "es-workspace-avatar")}
+            <span className="es-workspace-main">
+              <span className="es-workspace-name">{user?.display_name || user?.username || "You"}</span>
+              <span className="es-workspace-meta">waiting for collaborators</span>
+            </span>
+            <span className="es-workspace-dot" />
+          </div>
+        )}
+      </div>
+      <div className="es-workspace-divider" />
+      <div className="es-workspace-activity">
+        {workspaceActivity.map((entry) => {
+          const clickable = typeof entry.fileId === "number";
+          const activityPerson = entry.userId
+            ? (presence || []).find((person) => person.user_id === entry.userId)
+            : null;
+          return (
+            <button
+              type="button"
+              className={`es-workspace-row activity ${clickable ? "clickable" : ""}`}
+              key={entry.id}
+              onClick={() => clickable && jumpToActivity(entry)}
+              disabled={!clickable}
+              title={clickable ? `Jump to ${resolveFileName(entry.fileId)}` : entry.text}
+            >
+              {renderSidebarAvatar(activityPerson || { name: "bot", color: "rgba(247, 247, 242, 0.2)" }, "es-workspace-avatar")}
+              <span className="es-workspace-main">
+                <span className="es-workspace-activity-text">{entry.text}</span>
+              </span>
+              <span className="es-workspace-time">{formatActivityTime(entry.ts)}</span>
+              <span className="es-workspace-dot" />
+            </button>
+          );
+        })}
+        {workspaceActivity.length === 0 && <div className="es-empty">No activity yet.</div>}
+      </div>
+    </div>
+  );
+
+  const startSidebarResize = (event) => {
+    if (event.button !== 0) return;
+    event.preventDefault();
+    const startX = event.clientX;
+    const startWidth = sidebarWidth;
+    const maxWidth = Math.min(MAX_EDITOR_SIDEBAR_WIDTH, Math.floor(window.innerWidth * 0.42));
+    document.body.classList.add("resizing-editor-sidebar");
+
+    const handlePointerMove = (moveEvent) => {
+      const nextWidth = startWidth + moveEvent.clientX - startX;
+      setSidebarWidth(clampNumber(nextWidth, MIN_EDITOR_SIDEBAR_WIDTH, maxWidth));
+    };
+
+    const stopResize = () => {
+      document.body.classList.remove("resizing-editor-sidebar");
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
+  };
+
+  const startTerminalResize = (event) => {
+    if (event.button !== 0 || !terminalOpen) return;
+    event.preventDefault();
+    const startY = event.clientY;
+    const startHeight = terminalHeight;
+    const maxHeight = Math.min(MAX_TERMINAL_HEIGHT, Math.floor(window.innerHeight * 0.62));
+    document.body.classList.add("resizing-editor-terminal");
+
+    const handlePointerMove = (moveEvent) => {
+      const nextHeight = startHeight + startY - moveEvent.clientY;
+      setTerminalHeight(clampNumber(nextHeight, MIN_TERMINAL_HEIGHT, maxHeight));
+    };
+
+    const stopResize = () => {
+      document.body.classList.remove("resizing-editor-terminal");
+      window.removeEventListener("pointermove", handlePointerMove);
+      window.removeEventListener("pointerup", stopResize);
+      window.removeEventListener("pointercancel", stopResize);
+    };
+
+    window.addEventListener("pointermove", handlePointerMove);
+    window.addEventListener("pointerup", stopResize);
+    window.addEventListener("pointercancel", stopResize);
+  };
+
+  const terminalPanelHeight = isMobileViewport ? "min(42dvh, 300px)" : `${terminalHeight}px`;
+  const runDisabled =
+    (!currentFile && !isBlockEditorActive) ||
+    running ||
+    (
+      isPybricksProject
+        ? !canEdit ||
+          (isRemoteHubGuestMode
+            ? !remoteHubHost
+            : !pybricksHubState.connected)
+        : !runtimeReady
+    );
+  const runButtonLabel = running
+    ? "Running..."
+    : isPybricksProject
+      ? isRemoteHubGuestMode
+        ? "Run on Host Hub"
+        : "Download & Run"
+      : "Run Code";
+  const mobileRunLabel = running ? "Running" : "Run";
+
+  const renderEditorTreeEntry = (entry, depth = 0) => {
+    const isActive = isEditorEntryActive(entry);
+    const isFolder = entry.kind === "folder";
+    const isFile = entry.kind === "file";
+    const isBlocks = entry.kind === "blocks";
+    const isExpanded = isFolder ? isFolderExpanded(entry.path) : false;
+    const canDragEntry = canEdit && (isFile || (isFolder && entry.id));
+    const isDragging =
+      draggingTreeEntry && draggingTreeEntry.kind === entry.kind && draggingTreeEntry.id === entry.id;
+    const isDropTarget =
+      treeDropTarget &&
+      ((treeDropTarget.mode === "inside" && isFolder && treeDropTarget.targetKind === "folder" && treeDropTarget.targetId === entry.id) ||
+        (treeDropTarget.mode !== "inside" && treeDropTarget.targetKind === entry.kind && treeDropTarget.targetId === entry.id));
+    const dropClass = isDropTarget ? `drop-${treeDropTarget.mode}` : "";
+    const file = isFile ? files.find((item) => item.id === entry.id) : null;
+    const document = isBlocks ? blockDocuments.find((item) => item.id === entry.id) : null;
+    const folder = isFolder ? folders.find((item) => item.id === entry.id) : null;
+
+    return (
+      <div key={entry.key} className="es-file-tree-node">
+        <div className="es-file-tree-row-wrap">
+          {isActive && (
+            <motion.div
+              layoutId="activeFileBg"
+              className="es-file-active-bg"
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              exit={{ opacity: 0 }}
+            />
+          )}
+          <motion.div
+            layout
+            className={`es-file-item es-file-tree-row ${isActive ? "active" : ""} ${isFolder ? "folder" : ""} ${isDragging ? "dragging" : ""} ${dropClass}`}
+            style={{ "--tree-depth": depth }}
+            draggable={canDragEntry}
+            onDragStart={(event) => handleTreeDragStart(event, entry)}
+            onDragOver={(event) => (isFile || isFolder ? handleTreeDragOver(event, entry) : undefined)}
+            onDrop={handleTreeDrop}
+            onDragEnd={handleTreeDragEnd}
+            onClick={() => {
+              if (isFolder) {
+                toggleFolderExpanded(entry.path);
+                return;
+              }
+              openEditorEntry(entry);
+            }}
+            whileHover={{ x: 2 }}
+          >
+            <span className="es-file-name" title={entry.path || entry.fullName || entry.name}>
+              {isFolder && (
+                <button
+                  type="button"
+                  className="es-folder-toggle"
+                  onClick={(event) => {
+                    event.stopPropagation();
+                    toggleFolderExpanded(entry.path);
+                  }}
+                  aria-label={isExpanded ? "Collapse folder" : "Expand folder"}
+                >
+                  {isExpanded ? <FiChevronDown size={13} /> : <FiChevronRight size={13} />}
+                </button>
+              )}
+              {isBlocks ? (
+                <FiZap size={13} className="es-file-icon-py" />
+              ) : isFolder ? (
+                <FiFolder size={14} className="es-folder-icon" />
+              ) : (
+                <FiFile size={13} className={(entry.fullName || entry.name).endsWith(".py") ? "es-file-icon-py" : "es-file-icon"} />
+              )}
+              <span className="es-file-label">{entry.name}</span>
+            </span>
+            <div className="es-file-actions">
+              {canEdit && (
+                <>
+                  {isFolder && entry.id && (
+                    <>
+                      <button
+                        type="button"
+                        className="es-file-action"
+                        title="New file in folder"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          createFile("text", entry.path);
+                        }}
+                      >
+                        <FiFilePlus size={11} />
+                      </button>
+                      <button
+                        type="button"
+                        className="es-file-action"
+                        title="New folder inside"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          createFile("folder", entry.path);
+                        }}
+                      >
+                        <FiFolderPlus size={11} />
+                      </button>
+                    </>
+                  )}
+                  {(isFile || isBlocks || (isFolder && entry.id)) && (
+                    <button
+                      type="button"
+                      className="es-file-action"
+                      title="Rename"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (isBlocks && document) {
+                          renameBlockDocument(document);
+                        } else if (isFolder && folder) {
+                          renameFolder(folder);
+                        } else if (file) {
+                          renameFile(file);
+                        }
+                      }}
+                    >
+                      <FiEdit2 size={11} />
+                    </button>
+                  )}
+                  {(isFile || isBlocks || (isFolder && entry.id)) && (
+                    <button
+                      type="button"
+                      className="es-file-action danger"
+                      title="Delete"
+                      onClick={(event) => {
+                        event.stopPropagation();
+                        if (isBlocks) {
+                          deleteBlockDocument(entry.id);
+                        } else if (isFolder && folder) {
+                          deleteFolder(folder);
+                        } else {
+                          deleteFile(entry.id);
+                        }
+                      }}
+                    >
+                      <FiTrash2 size={11} />
+                    </button>
+                  )}
+                </>
+              )}
+            </div>
+            {isActive && <span className="es-file-live-dot" aria-hidden="true" />}
+          </motion.div>
+        </div>
+        {isFolder && isExpanded && entry.children?.length > 0 && (
+          <div className="es-folder-children">{entry.children.map((child) => renderEditorTreeEntry(child, depth + 1))}</div>
+        )}
+      </div>
+    );
+  };
+
   return (
-    <div className="editor-shell">
+    <div
+      className="editor-shell"
+      style={{
+        "--editor-sidebar-width": `${sidebarWidth}px`,
+        "--terminal-height": terminalPanelHeight,
+      }}
+    >
       <AnimatePresence>
         {!isViewerMode && !isMobileViewport && !sidebarOpen && (
           <motion.aside
@@ -2738,499 +4403,315 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         {!isViewerMode && sidebarOpen && (
           <motion.aside
             className="editor-sidebar"
-            initial={{ x: -260, opacity: 0 }}
+            initial={isMobileViewport ? { x: "-100%", opacity: 1 } : { x: -260, opacity: 0 }}
             animate={{ x: 0, opacity: 1 }}
-            exit={{ x: -260, opacity: 0 }}
+            exit={isMobileViewport ? { x: "-100%", opacity: 1 } : { x: -260, opacity: 0 }}
             transition={{ duration: 0.25, ease: "circOut" }}
           >
             <div className="es-header">
-              <button className="es-back-btn" onClick={() => navigate("/")} title="Return to Dashboard">
-                <FiChevronLeft size={16} />
+              <button
+                type="button"
+                className="es-back-btn es-dashboard-back"
+                onClick={() => {
+                  if (activeSidebarScreen) {
+                    setActiveSidebarScreen("");
+                  } else {
+                    navigate("/");
+                  }
+                }}
+                title={activeSidebarScreen ? "Back to sidebar" : "Back to dashboard"}
+                aria-label={activeSidebarScreen ? "Back to sidebar" : "Back to dashboard"}
+              >
+                <FiChevronLeft size={18} />
               </button>
-              <div className="es-project-name">{project?.name}</div>
+              <div className="es-project-heading">
+                <div className="es-project-name">{project?.name || "Untitled project"}</div>
+                <div className="es-project-presence">
+                  <span className={`es-presence-dot ${wsConnected ? "online" : ""}`} />
+                  <span>{presence.length} online</span>
+                  {sidebarPresencePreview.length > 0 && (
+                    <span className="es-presence-stack" aria-label={`${presence.length} online`}>
+                      {sidebarPresencePreview.map((person) => (
+                        <span className="es-presence-avatar-wrap" key={person.user_id}>
+                          {renderSidebarAvatar(person)}
+                        </span>
+                      ))}
+                      {sidebarPresenceOverflow > 0 && <span className="es-presence-overflow">+{sidebarPresenceOverflow}</span>}
+                    </span>
+                  )}
+                </div>
+              </div>
               <div className="es-header-actions">
-                {user?.is_admin && (
-                  <button
-                    className={`es-icon-btn ${ghostMode ? "active" : ""}`}
-                    onClick={() => setGhostMode(!ghostMode)}
-                    title={ghostMode ? "Ghost Mode ON" : "Ghost Mode OFF"}
-                  >
-                    {ghostMode ? <FiEyeOff size={14} /> : <FiEye size={14} />}
-                  </button>
-                )}
-                <button className="es-icon-btn" onClick={() => setSidebarOpen(false)} title="Collapse Sidebar">
-                  <FiSidebar size={14} />
+                <button type="button" className="es-icon-btn" onClick={() => setSidebarOpen(false)} title="Collapse Sidebar">
+                  <FiMenu size={17} />
                 </button>
               </div>
             </div>
 
-            {canEdit && project?.owner_id === user?.id && (
-              <div className="es-description">
-                <p
-                  className="es-description-text"
-                  onClick={() => {
-                    const newDesc = prompt("Enter project description:", project?.description || "");
-                    if (newDesc !== null) {
-                      api.patch(`/projects/${projectApiId}`, { name: project?.name, description: newDesc }).then(res => setProject(res.data)).catch(console.error);
-                    }
-                  }}
-                >
-                  {project?.description || <span className="es-description-empty">Add a description...</span>}
-                </p>
-              </div>
-            )}
-
-            <div className="es-section es-files-section">
-              <div className="es-section-header">
-                <span className="es-section-label">Files</span>
-                {canEdit && (
-                  <div className="es-create-file-menu-wrap" ref={createFileMenuRef}>
-                    <button className={`es-icon-btn${createFileMenuOpen ? " active" : ""}`} onClick={openCreateFileMenu} title="New File">
-                      <FiPlus size={14} />
-                    </button>
-                    {createFileMenuOpen && (
-                      <div className="es-create-file-menu" role="menu" aria-label="Create file">
-                        <button className="es-create-file-option" onClick={() => createFile("text")}>
-                          <FiFile size={13} />
-                          <span>Text File</span>
-                        </button>
-                        {isPybricksProject && (
-                          <button className="es-create-file-option" onClick={() => createFile("blocks")}>
-                            <FiZap size={13} />
-                            <span>Block File</span>
-                          </button>
-                        )}
-                      </div>
-                    )}
+            {activeSidebarScreen ? (
+              <motion.div
+                key={activeSidebarScreen}
+                className="es-sidebar-screen"
+                initial={{ opacity: 0, x: 12 }}
+                animate={{ opacity: 1, x: 0 }}
+                exit={{ opacity: 0, x: 12 }}
+                transition={{ duration: 0.18, ease: "easeOut" }}
+              >
+                <div className="es-sidebar-screen-header">
+                  <div className="es-sidebar-screen-title-wrap">
+                    <span className="es-sidebar-screen-title">
+                      {activeSidebarScreen === "tasks" ? `Tasks (${openTaskCount})` : `Checkpoints (${sortedSnapshots.length})`}
+                    </span>
+                    <span className="es-sidebar-screen-subtitle">
+                      {activeSidebarScreen === "tasks"
+                        ? openTaskCount === 0
+                          ? "No open tasks"
+                          : `${openTaskCount} open, ${doneTaskCount} done`
+                        : sortedSnapshots.length === 1
+                          ? "1 saved checkpoint"
+                          : `${sortedSnapshots.length} saved checkpoints`}
+                    </span>
                   </div>
-                )}
-              </div>
-              <div className="es-search-wrap">
-                <FiSearch className="es-search-icon" size={13} />
-                <input
-                  className="es-search-input"
-                  placeholder="Search files..."
-                  value={fileSearch}
-                  onChange={(e) => setFileSearch(e.target.value)}
-                />
-              </div>
-              <div className="es-file-list">
-                <AnimatePresence initial={false}>
-                  {filteredEditorEntries.map((entry) => {
-                    const isActive = isEditorEntryActive(entry);
-                    return (
-                    <div key={entry.key} style={{ position: "relative" }}>
-                      {isActive && (
-                        <motion.div
-                          layoutId="activeFileBg"
-                          className="es-file-active-bg"
-                          initial={{ opacity: 0 }}
-                          animate={{ opacity: 1 }}
-                          exit={{ opacity: 0 }}
-                        />
-                      )}
-                      <motion.div
-                        layout
-                        className={`es-file-item ${isActive ? "active" : ""}`}
-                        onClick={() =>
-                          entry.kind === "blocks" ? selectBlockDocument(entry.id) : selectFile(entry.id)
-                        }
-                        whileHover={{ x: 2 }}
-                      >
-                        <span className="es-file-name">
-                          {entry.kind === "blocks" ? (
-                            <FiZap size={13} className="es-file-icon-py" />
-                          ) : (
-                            <FiFile size={13} className={entry.name.endsWith(".py") ? "es-file-icon-py" : "es-file-icon"} />
-                          )}
-                          {entry.name}
-                        </span>
-                        <div className="es-file-actions">
-                          {canEdit && (
-                            <>
-                              <button
-                                className="es-file-action"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (entry.kind === "blocks") {
-                                    const document = blockDocuments.find((item) => item.id === entry.id);
-                                    if (document) renameBlockDocument(document);
-                                    return;
-                                  }
-                                  const file = files.find((item) => item.id === entry.id);
-                                  if (file) renameFile(file);
-                                }}
-                              >
-                                <FiEdit2 size={11} />
-                              </button>
-                              <button
-                                className="es-file-action danger"
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (entry.kind === "blocks") {
-                                    deleteBlockDocument(entry.id);
-                                    return;
-                                  }
-                                  deleteFile(entry.id);
-                                }}
-                              >
-                                <FiTrash2 size={11} />
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      </motion.div>
-                    </div>
-                  )})}
-                  {filteredEditorEntries.length === 0 && <div className="es-empty">No matching files.</div>}
-                </AnimatePresence>
-              </div>
-            </div>
-
-            <div className="es-section">
-              <div className="es-section-header">
-                <span className="es-section-label">Live Tasks</span>
-                <div className="es-task-head-actions">
-                  <button
-                    className={`es-task-filter ${showOnlyMyTasks ? "active" : ""}`}
-                    onClick={() => setShowOnlyMyTasks((prev) => !prev)}
-                  >
-                    {showOnlyMyTasks ? `Mine (${myTaskCount})` : "All"}
-                  </button>
-                  <span className="es-badge">{openTaskCount}</span>
                 </div>
-              </div>
-              {canEdit && (
-                <div className="es-task-compose">
-                  <input
-                    className="es-task-input"
-                    type="text"
-                    value={taskDraft}
-                    maxLength={240}
-                    placeholder="Add a collaboration task..."
-                    onChange={(event) => setTaskDraft(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        addTask();
-                      }
-                    }}
-                    disabled={savingTask}
-                  />
-                  <button className="es-task-add" onClick={addTask} disabled={savingTask || !taskDraft.trim()}>
-                    <FiPlus size={13} />
-                  </button>
+                <div className="es-sidebar-screen-body">
+                  {activeSidebarScreen === "tasks" ? renderTaskDetails() : renderCheckpointDetails()}
                 </div>
-              )}
-              <div className="es-task-list">
-                {visibleTasks.map((task) => (
-                  <div key={task.id} className={`es-task-item ${task.is_done ? "done" : ""}`}>
-                    <button className="es-task-toggle" onClick={() => toggleTask(task)} disabled={!canEdit}>
-                      {task.is_done ? <FiCheck size={12} /> : <FiSquare size={12} />}
-                    </button>
-                    <div className="es-task-main">
-                      <span className="es-task-content">{task.content}</span>
-                      <span className="es-task-meta">
-                        {task.is_done ? `Done by ${task.completed_by_name || "team"}` : `Added by ${task.created_by_name || "team"}`}
-                        {task.assigned_to_name ? ` · Assigned to ${task.assigned_to_name}` : " · Unassigned"}
-                      </span>
-                    </div>
-                    {canEdit && (
-                      <div className="es-task-row-actions">
-                        <button
-                          className={`es-task-assign ${task.assigned_to_user_id === user?.id ? "active" : ""}`}
-                          onClick={() => toggleTaskOwnership(task)}
-                          title={task.assigned_to_user_id === user?.id ? "Release task" : "Take task"}
-                        >
-                          {task.assigned_to_user_id === user?.id ? "Release" : "Take"}
-                        </button>
-                        <button className="es-task-delete" onClick={() => removeTask(task.id)} title="Delete task">
-                          <FiTrash2 size={11} />
-                        </button>
-                      </div>
-                    )}
-                  </div>
-                ))}
-                {visibleTasks.length === 0 && (
-                  <div className="es-empty">
-                    {showOnlyMyTasks ? "No assigned tasks in your focus list." : "No tasks yet. Add the first one."}
-                  </div>
-                )}
-              </div>
-            </div>
-
-            <div className="es-section">
-              <div className="es-section-header">
-                <span className="es-section-label">Checkpoints</span>
-                <span className="es-badge">{sortedSnapshots.length}</span>
-              </div>
-              {canEdit && (
-                <div className="es-snapshot-compose">
-                  <input
-                    className="es-snapshot-input"
-                    type="text"
-                    value={snapshotDraft}
-                    maxLength={120}
-                    placeholder="Checkpoint name (optional)"
-                    onChange={(event) => setSnapshotDraft(event.target.value)}
-                    onKeyDown={(event) => {
-                      if (event.key === "Enter") {
-                        event.preventDefault();
-                        createSnapshot();
-                      }
-                    }}
-                    disabled={creatingSnapshot}
-                  />
-                  <button
-                    className="es-snapshot-add"
-                    onClick={createSnapshot}
-                    disabled={creatingSnapshot}
-                    title="Create checkpoint"
-                  >
-                    {creatingSnapshot ? "..." : "Save"}
-                  </button>
-                </div>
-              )}
-              <div className="es-snapshot-list">
-                {sortedSnapshots.map((snapshot) => (
-                  <div key={snapshot.id} className="es-snapshot-item">
-                    <div className="es-snapshot-main">
-                      <span className="es-snapshot-name">{snapshot.name}</span>
-                      <span className="es-snapshot-meta">
-                        {snapshot.created_by_name || "Team"} · {snapshot.file_count || 0} files ·{" "}
-                        {snapshot.created_at
-                          ? new Date(snapshot.created_at).toLocaleString([], {
-                              month: "short",
-                              day: "numeric",
-                              hour: "2-digit",
-                              minute: "2-digit",
-                            })
-                          : "Unknown time"}
-                      </span>
-                    </div>
-                    <div className="es-snapshot-actions">
-                      <button
-                        className="es-snapshot-menu-trigger"
-                        onClick={() =>
-                          setOpenSnapshotMenuId((prev) => (prev === snapshot.id ? null : snapshot.id))
-                        }
-                        aria-label={`Checkpoint actions for ${snapshot.name}`}
-                        aria-expanded={openSnapshotMenuId === snapshot.id}
-                        title="Checkpoint actions"
-                      >
-                        <FiMoreVertical size={14} />
-                      </button>
-                      {openSnapshotMenuId === snapshot.id && (
-                        <div className="es-snapshot-menu" role="menu">
-                          <button
-                            className="es-snapshot-menu-item"
-                            onClick={() => exportSnapshot(snapshot)}
-                            disabled={!projectApiId || exportingSnapshotId === snapshot.id}
-                          >
-                            {exportingSnapshotId === snapshot.id ? "Exporting..." : "Export"}
-                          </button>
-                          {canEdit && (
-                            <>
-                              <button
-                                className="es-snapshot-menu-item"
-                                onClick={() => restoreSnapshot(snapshot)}
-                                disabled={restoringSnapshotId === snapshot.id}
-                              >
-                                {restoringSnapshotId === snapshot.id ? "Restoring..." : "Restore"}
-                              </button>
-                              <button
-                                className="es-snapshot-menu-item danger"
-                                onClick={() => removeSnapshot(snapshot.id)}
-                              >
-                                Delete
-                              </button>
-                            </>
-                          )}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))}
-                {sortedSnapshots.length === 0 && <div className="es-empty">No checkpoints yet.</div>}
-              </div>
-            </div>
-
-            <div className="es-section">
-              <div className="es-section-header">
-                <span className="es-section-label">Team</span>
-                <span className="es-badge">{presence.length}</span>
-              </div>
-              <div className="es-team-list">
-                <AnimatePresence>
-                  {(presence || []).map((p) => {
-                    const voiceState = voiceByUserId.get(p.user_id);
-                    const voiceMutedState = voiceState ? !!voiceState.muted : false;
-                    const voiceSpeakingState = voiceState ? !!voiceState.speaking && !voiceMutedState : false;
-                    return (
-                      <motion.div
-                        key={p.user_id}
-                        initial={{ opacity: 0, x: -8 }}
-                        animate={{ opacity: 1, x: 0 }}
-                        exit={{ opacity: 0, x: -8 }}
-                        className="es-team-item"
-                      >
-                        {p.avatar ? (
-                          <img src={resolveHostedAssetUrl(p.avatar)} className="es-team-avatar" alt={p.name} />
-                        ) : (
-                          <span className="es-team-avatar-fallback" style={{ background: p.color }}>
-                            {p.name[0]}
-                          </span>
-                        )}
-                        <div className="es-team-main">
-                          <span className="es-team-name">
-                            {p.name} {p.is_admin && <VerifiedBadge size={11} />} {p.user_id === user.id && <span className="muted">(You)</span>}
-                          </span>
-                          <span className="es-team-location">
-                            {Number.isInteger(p.block_presence?.documentId)
-                              ? `In ${blockDocumentNameById.get(p.block_presence.documentId) || "a block file"}`
-                              : typeof p.cursor?.fileId === "number"
-                              ? `In ${fileNameById.get(p.cursor.fileId) || "an untitled file"}`
-                              : "Idle"}
-                          </span>
-                        </div>
-                        {voiceState && (
-                          <span className={`es-team-voice ${voiceSpeakingState ? "speaking" : ""}`}>
-                            {voiceMutedState ? <FiMicOff size={11} /> : <FiVolume2 size={11} />}
-                            {voiceMutedState ? "Muted" : voiceSpeakingState ? "Speaking" : "In call"}
-                          </span>
-                        )}
-                        {p.user_id !== user.id && (
-                          <button
-                            className={`es-follow-btn ${followTargetId === p.user_id ? "active" : ""}`}
-                            onClick={() => {
-                              mirroredCursorRef.current = { fileId: null, from: -1, to: -1 };
-                              if (followTargetId === p.user_id) {
-                                setFollowTargetId(null);
-                                return;
+              </motion.div>
+            ) : (
+              <>
+                {(project?.description || projectPermissions.can_manage) && (
+                  <div className="es-description">
+                    <p
+                      className={`es-description-text ${projectPermissions.can_manage ? "editable" : ""}`}
+                      onClick={
+                        projectPermissions.can_manage
+                          ? () => {
+                              const newDesc = prompt("Enter project description:", project?.description || "");
+                              if (newDesc !== null) {
+                                api
+                                  .patch(`/projects/${projectApiId}`, { name: project?.name, description: newDesc })
+                                  .then((res) => setProject(freezeSerializable(res.data)))
+                                  .catch(console.error);
                               }
-                              setFollowTargetId(p.user_id);
-                              setFollowFlash(`Quantum sync locked on ${p.name}.`);
+                            }
+                          : undefined
+                      }
+                    >
+                      {project?.description || <span className="es-description-empty">Add a description...</span>}
+                    </p>
+                  </div>
+                )}
+
+                <div className="es-section es-files-section">
+                  <div className="es-file-group-header">
+                    <button
+                      type="button"
+                      className={`es-file-group-toggle ${filesCollapsed ? "collapsed" : ""}`}
+                      onClick={() => setFilesCollapsed((prev) => !prev)}
+                      aria-expanded={!filesCollapsed}
+                      title={filesCollapsed ? "Show files" : "Hide files"}
+                    >
+                      <FiChevronDown size={15} />
+                    </button>
+                    <span className="es-file-group-title">Files</span>
+                    {canEdit && (
+                      <div className="es-create-file-menu-wrap es-file-create-menu-wrap" ref={createFileMenuRef}>
+                        <button
+                          type="button"
+                          className={`es-icon-btn es-file-create-btn${createFileMenuOpen ? " active" : ""}`}
+                          onClick={openCreateFileMenu}
+                          title="New file"
+                        >
+                          <FiPlus size={14} />
+                        </button>
+                        {createFileMenuOpen && (
+                          <div className="es-create-file-menu" role="menu" aria-label="Create file">
+                            <button type="button" className="es-create-file-option" onClick={() => createFile("text")}>
+                              <FiFile size={13} />
+                              <span>Text File</span>
+                            </button>
+                            <button type="button" className="es-create-file-option" onClick={() => createFile("folder")}>
+                              <FiFolderPlus size={13} />
+                              <span>Folder</span>
+                            </button>
+                            {isPybricksProject && (
+                              <button type="button" className="es-create-file-option" onClick={() => createFile("blocks")}>
+                                <FiZap size={13} />
+                                <span>Block File</span>
+                              </button>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  <AnimatePresence initial={false}>
+                    {!filesCollapsed && (
+                      <motion.div
+                        key="files"
+                        className="es-file-collapse-body"
+                        initial={{ height: 0, opacity: 0 }}
+                        animate={{ height: "auto", opacity: 1 }}
+                        exit={{ height: 0, opacity: 0 }}
+                        transition={{ duration: 0.16, ease: "easeOut" }}
+                      >
+                        <div className="es-file-search-row">
+                          <div className="es-search-wrap">
+                            <FiSearch className="es-search-icon" size={13} />
+                            <input
+                              ref={fileSearchInputRef}
+                              className="es-search-input"
+                              placeholder="Search files..."
+                              value={fileSearch}
+                              onChange={(e) => setFileSearch(e.target.value)}
+                            />
+                          </div>
+                        </div>
+                        <div className="es-file-list-shell">
+                          <div
+                            className={`es-file-list es-file-tree ${treeDropTarget?.targetKind === "root" ? "drop-root" : ""}`}
+                            onDragOver={handleTreeRootDragOver}
+                            onDrop={handleTreeDrop}
+                            onDragLeave={(event) => {
+                              if (!event.currentTarget.contains(event.relatedTarget)) {
+                                setTreeDropTarget(null);
+                              }
                             }}
                           >
-                            {followTargetId === p.user_id ? "Synced" : "Beam In"}
-                          </button>
-                        )}
-                        <span className="es-online-dot" />
+                            {filteredEditorEntries.map((entry) => renderEditorTreeEntry(entry))}
+                            {filteredEditorEntries.length === 0 && <div className="es-empty">No matching files.</div>}
+                          </div>
+                        </div>
                       </motion.div>
-                    );
-                  })}
-                </AnimatePresence>
-                {presence.length === 0 && <div className="es-empty">Only you here.</div>}
-              </div>
-              {followFlash && <div className="es-follow-flash">{followFlash}</div>}
-            </div>
-
-            <div className="es-section">
-              <div className="es-section-header">
-                <span className="es-section-label">Live Activity</span>
-                <div className="es-task-head-actions">
-                  <button
-                    className="es-task-filter"
-                    onClick={() => setActivityFeed([])}
-                    disabled={recentActivity.length === 0}
-                  >
-                    Clear
-                  </button>
-                  <span className="es-badge">{recentActivity.length}</span>
+                    )}
+                  </AnimatePresence>
                 </div>
-              </div>
-              <div className="es-activity-list">
-                {recentActivity.map((entry) => {
-                  const clickable = typeof entry.fileId === "number";
-                  return (
+
+                {renderWorkspacePanel()}
+
+                <div className="es-summary-stack">
+                  <div className="es-summary-card">
                     <button
-                      key={entry.id}
-                      className={`es-activity-item ${clickable ? "clickable" : ""}`}
-                      onClick={() => clickable && jumpToActivity(entry)}
-                      disabled={!clickable}
-                      title={clickable ? `Jump to ${resolveFileName(entry.fileId)}` : entry.text}
+                      type="button"
+                      className="es-summary-card-button"
+                      onClick={() => openSidebarScreen("tasks")}
                     >
-                      <span className={`es-activity-icon kind-${entry.kind}`}>{activityIcon(entry.kind)}</span>
-                      <span className="es-activity-main">
-                        <span className="es-activity-text">{entry.text}</span>
-                        <span className="es-activity-meta">
-                          <FiClock size={10} /> {formatActivityTime(entry.ts)}
-                          {entry.count > 1 ? ` · ${entry.count}x` : ""}
+                      <span className="es-summary-icon tasks">
+                        <FiCheck size={18} />
+                      </span>
+                      <span className="es-summary-main">
+                        <span className="es-summary-title">Tasks ({openTaskCount})</span>
+                        <span className="es-summary-subtitle">
+                          {openTaskCount === 0 ? "No tasks yet" : `${openTaskCount} open, ${doneTaskCount} done`}
                         </span>
                       </span>
+                      <FiChevronDown className="es-summary-chevron" size={18} />
                     </button>
-                  );
-                })}
-                {recentActivity.length === 0 && <div className="es-empty">No activity yet. Waiting for teammates...</div>}
-              </div>
-            </div>
+                  </div>
 
-            <div className="es-footer">
-              {canEdit && project?.owner_id === user?.id && (
-                <button
-                  className="es-visibility-btn"
-                  onClick={() => {
-                    const newVisibility = project?.is_public ? "Private" : "Public";
-                    if (confirm(`Change visibility to ${newVisibility}?`)) {
-                      api.patch(`/projects/${projectApiId}/visibility`).then(res => setProject(res.data)).catch(console.error);
-                    }
-                  }}
-                >
-                  {project?.is_public ? <><FiEye size={13} /> Public</> : <><FiEyeOff size={13} /> Private</>}
-                </button>
-              )}
-              <div className="es-footer-row">
-                <button className="es-icon-btn" onClick={toggleTheme} title="Toggle Theme">
-                  {theme === "dark" ? <FiSun size={15} /> : <FiMoon size={15} />}
-                </button>
-                <button className="es-share-btn" onClick={generateSharePin}>
-                  <FiShare2 size={13} /> Share
-                </button>
-              </div>
-              <AnimatePresence>
-                {sharePin && (
-                  <motion.div
-                    key="share-pin"
-                    initial={{ opacity: 0, y: -4 }}
-                    animate={{ opacity: 1, y: 0 }}
-                    exit={{ opacity: 0, y: -4 }}
-                    className="es-pin-card"
-                    ref={sharePinCardRef}
-                  >
-                    <div className="es-pin-row">
-                      <div className="es-pin-meta">
-                        <span className="es-pin-label">Share Code</span>
-                        <span className="es-pin-code">{sharePin}</span>
-                      </div>
-                      <div className="es-pin-actions">
-                        <button className="es-icon-btn" onClick={copyShareCode} title="Copy share code">
-                          {copiedCode ? <FiCheck size={14} color="var(--success)" /> : <FiCopy size={14} />}
-                        </button>
-                        <button className="es-pin-link-toggle" onClick={() => setShowShareLink((prev) => !prev)}>
-                          {showShareLink ? "Hide Link" : "Show Link"}
-                        </button>
-                      </div>
-                    </div>
-                    {showShareLink && (
-                      <div className="es-pin-row es-pin-link-row">
-                        <div className="es-pin-meta">
-                          <span className="es-pin-label">Share Link</span>
-                          <span className="es-pin-url">{HOSTED_WEB_BASE}/share/{sharePin}</span>
-                        </div>
-                        <button className="es-icon-btn" onClick={copyShareLink} title="Copy share link">
-                          {copiedLink ? <FiCheck size={14} color="var(--success)" /> : <FiCopy size={14} />}
-                        </button>
-                      </div>
+                  <div className="es-summary-card">
+                    <button
+                      type="button"
+                      className="es-summary-card-button"
+                      onClick={() => openSidebarScreen("checkpoints")}
+                    >
+                      <span className="es-summary-icon checkpoints">
+                        <FiCopy size={17} />
+                      </span>
+                      <span className="es-summary-main">
+                        <span className="es-summary-title">Checkpoints ({sortedSnapshots.length})</span>
+                        <span className="es-summary-subtitle">
+                          {sortedSnapshots.length === 1 ? "1 checkpoint" : `${sortedSnapshots.length} checkpoints`}
+                        </span>
+                      </span>
+                      <FiChevronDown className="es-summary-chevron" size={18} />
+                    </button>
+                  </div>
+                </div>
+
+                <div className="es-footer">
+                  {projectPermissions.can_toggle_visibility && (
+                    <button
+                      type="button"
+                      className="es-visibility-btn"
+                      onClick={() => {
+                        const newVisibility = project?.is_public ? "Private" : "Public";
+                        if (confirm(`Change visibility to ${newVisibility}?`)) {
+                          api
+                            .patch(`/projects/${projectApiId}/visibility`)
+                            .then((res) => setProject(freezeSerializable(res.data)))
+                            .catch(console.error);
+                        }
+                      }}
+                    >
+                      {project?.is_public ? <><FiEye size={13} /> Public</> : <><FiEyeOff size={13} /> Private</>}
+                    </button>
+                  )}
+                  <div className="es-footer-row">
+                    <button type="button" className="es-share-btn" onClick={exportProjectBundle} disabled={!projectApiId || exportingProjectBundle}>
+                      <FiDownload size={13} /> {exportingProjectBundle ? "Exporting..." : "Export"}
+                    </button>
+                    {projectPermissions.can_share && (
+                      <button type="button" className="es-share-btn" onClick={generateSharePin}>
+                        <FiShare2 size={13} /> Share
+                      </button>
                     )}
-                  </motion.div>
-                )}
-              </AnimatePresence>
-            </div>
+                  </div>
+                  <AnimatePresence>
+                    {sharePin && (
+                      <motion.div
+                        key="share-pin"
+                        initial={{ opacity: 0, y: -4 }}
+                        animate={{ opacity: 1, y: 0 }}
+                        exit={{ opacity: 0, y: -4 }}
+                        className="es-pin-card"
+                        ref={sharePinCardRef}
+                      >
+                        <div className="es-pin-row">
+                          <div className="es-pin-meta">
+                            <span className="es-pin-label">Share Code</span>
+                            <span className="es-pin-code">{sharePin}</span>
+                          </div>
+                          <div className="es-pin-actions">
+                            <button type="button" className="es-icon-btn" onClick={copyShareCode} title="Copy share code">
+                              {copiedCode ? <FiCheck size={14} color="var(--success)" /> : <FiCopy size={14} />}
+                            </button>
+                            <button type="button" className="es-pin-link-toggle" onClick={() => setShowShareLink((prev) => !prev)}>
+                              {showShareLink ? "Hide Link" : "Show Link"}
+                            </button>
+                          </div>
+                        </div>
+                        {showShareLink && (
+                          <div className="es-pin-row es-pin-link-row">
+                            <div className="es-pin-meta">
+                              <span className="es-pin-label">Share Link</span>
+                              <span className="es-pin-url">{HOSTED_WEB_BASE}/share/{sharePin}</span>
+                            </div>
+                            <button type="button" className="es-icon-btn" onClick={copyShareLink} title="Copy share link">
+                              {copiedLink ? <FiCheck size={14} color="var(--success)" /> : <FiCopy size={14} />}
+                            </button>
+                          </div>
+                        )}
+                      </motion.div>
+                    )}
+                  </AnimatePresence>
+                </div>
+              </>
+            )}
           </motion.aside>
         )}
       </AnimatePresence>
 
-      {!isViewerMode && !isMobileViewport && sidebarOpen && <div className="panel-resizer vertical editor-divider" />}
+      {!isViewerMode && !isMobileViewport && sidebarOpen && (
+        <div
+          className="panel-resizer vertical editor-divider"
+          onPointerDown={startSidebarResize}
+          role="separator"
+          aria-orientation="vertical"
+          aria-label="Resize sidebar"
+          tabIndex={0}
+        />
+      )}
 
       <main className="editor-workspace">
         <header className={`editor-topbar ${isViewerMode ? "viewer-topbar-mode" : ""}`}>
@@ -3251,21 +4732,19 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                     />
                   </div>
                   <div className="viewer-file-tabs" role="tablist" aria-label="Project files">
-                    {filteredEditorEntries.map((entry) => (
+                    {flattenedEditorEntries.map((entry) => (
                       <button
                         key={`viewer-${entry.key}`}
                         className={`viewer-file-tab ${isEditorEntryActive(entry) ? "active" : ""}`}
-                        onClick={() =>
-                          entry.kind === "blocks" ? selectBlockDocument(entry.id) : selectFile(entry.id)
-                        }
+                        onClick={() => openEditorEntry(entry)}
                         role="tab"
                         aria-selected={isEditorEntryActive(entry)}
                       >
                         {entry.kind === "blocks" ? <FiZap size={12} /> : <FiFile size={12} />}
-                        <span>{entry.name}</span>
+                        <span>{entry.fullName || entry.name}</span>
                       </button>
                     ))}
-                    {filteredEditorEntries.length === 0 && <span className="viewer-file-empty">No matching files.</span>}
+                    {flattenedEditorEntries.length === 0 && <span className="viewer-file-empty">No matching files.</span>}
                   </div>
                 </div>
               </div>
@@ -3304,8 +4783,18 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                     </span>
                   )}
                   {isPybricksProject && (
-                    <span className={`chip ${pybricksHubState.connected ? "chip-success" : "chip-muted"}`}>
-                      {pybricksHubState.connected ? `${pybricksHubState.transportLabel} Hub` : "Hub Offline"}
+                    <span
+                      className={`chip ${
+                        (isRemoteHubGuestMode || pybricksHubState.connected) ? "chip-success" : "chip-muted"
+                      }`}
+                    >
+                      {isRemoteHubGuestMode
+                        ? `${remoteHubHost?.userName || "Remote"} Hub`
+                        : pybricksHubState.connected
+                          ? `${pybricksHubState.transportLabel} Hub`
+                          : remoteHubTakenByOther
+                            ? `${remoteHubHost?.userName || "Host"} Hosting`
+                            : "Hub Offline"}
                     </span>
                   )}
                   {followTarget && (
@@ -3353,12 +4842,12 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                   <FiTerminal size={16} />
                 </button>
                 <button
-                  className={`icon-btn${commandPaletteOpen ? " active" : ""}`}
+                  className={`icon-btn${projectSearchOpen ? " active" : ""}`}
                   onClick={() => {
-                    setCommandPaletteQuery("");
-                    setCommandPaletteOpen(true);
+                    setCommandPaletteOpen(false);
+                    setProjectSearchOpen(true);
                   }}
-                  title="Open command center"
+                  title="Search project (Cmd/Ctrl+F)"
                 >
                   <FiSearch size={16} />
                 </button>
@@ -3371,7 +4860,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                     <FiCode size={16} />
                   </button>
                 )}
-                {isPybricksProject && (
+                {isPybricksProject && canConnectLocalPybricksHub && (
                   <button
                     className={`btn ${pybricksHubState.connected ? "btn-ghost pybricks-connect-btn-connected" : "btn-primary pybricks-connect-btn"}`}
                     onClick={() => (pybricksHubState.connected ? disconnectPybricksHub() : setPybricksConnectModalOpen(true))}
@@ -3415,11 +4904,11 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                   whileHover={{ scale: 1.02 }}
                   whileTap={{ scale: 0.98 }}
                   className="btn btn-primary editor-run-btn"
-                  disabled={(!currentFile && !isBlockEditorActive) || running || !runtimeReady || (isPybricksProject && (!canEdit || !pybricksHubState.connected))}
+                  disabled={runDisabled}
                   onClick={runCode}
                 >
                   {running ? <div className="spinner" style={{ width: 16, height: 16, border: "2px solid currentColor", borderTopColor: "transparent" }} /> : <FiPlay fill="currentColor" />}
-                  {running ? "Running..." : isPybricksProject ? "Download & Run" : "Run Code"}
+                  {runButtonLabel}
                 </motion.button>
                 <button className="btn btn-ghost editor-stop-btn" disabled={!running} onClick={stopCode}>
                   <FiSquare size={14} /> Stop
@@ -3536,6 +5025,37 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
             )}
           </AnimatePresence>
           {!isViewerMode && voiceError && !voiceEnabled && <div className="voice-inline-error">{voiceError}</div>}
+          {isPybricksProject && remoteHubNotice && (
+            <div className="remote-hub-banner" role="status">
+              <FiZap size={14} />
+              <span>{remoteHubNotice}</span>
+            </div>
+          )}
+          {isPybricksProject && isRemoteHubHost && remoteHubPendingRequests.length > 0 && (
+            <div className="remote-hub-request-stack">
+              {remoteHubPendingRequests.map((request) => (
+                <div key={request.userId} className="remote-hub-request-card">
+                  <div className="remote-hub-request-copy">
+                    <strong>{request.userName}</strong> wants to join your hub session.
+                  </div>
+                  <div className="remote-hub-request-actions">
+                    <button
+                      className="btn btn-primary"
+                      onClick={() => respondToRemoteHubRequest(request.userId, true)}
+                    >
+                      Accept
+                    </button>
+                    <button
+                      className="btn btn-ghost"
+                      onClick={() => respondToRemoteHubRequest(request.userId, false)}
+                    >
+                      Decline
+                    </button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </header>
 
         <div className={`editor-workspace-body ${terminalOpen ? "" : "terminal-collapsed"}`}>
@@ -3582,9 +5102,22 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                 />
               )}
             </div>
+            <ProjectSearch
+              open={projectSearchOpen}
+              files={files}
+              onClose={() => setProjectSearchOpen(false)}
+              onSelect={openProjectSearchResult}
+            />
           </div>
 
-          <div className="panel-resizer horizontal editor-divider" />
+          <div
+            className="panel-resizer horizontal editor-divider"
+            onPointerDown={startTerminalResize}
+            role="separator"
+            aria-orientation="horizontal"
+            aria-label="Resize terminal"
+            tabIndex={0}
+          />
 
           <div className={`panel terminal-pane ${terminalOpen ? "" : "collapsed"}`}>
             <div className="panel-header terminal-header">
@@ -3593,11 +5126,15 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                 <strong>Terminal Output</strong>
                 <span className={`terminal-connection ${pybricksRuntimeOnline || runtimeReady ? "online" : "offline"}`}>
                   {isPybricksProject
-                    ? pybricksHubState.connected
-                      ? `${pybricksHubState.deviceName || "Hub"} Ready`
-                      : runtimeReady
-                        ? "Compiler Ready"
-                        : "Compiler Unavailable"
+                    ? isRemoteHubGuestMode
+                      ? `${remoteHubHost?.deviceName || "Remote Hub"} via ${remoteHubHost?.userName || "host"}`
+                      : pybricksHubState.connected
+                        ? `${pybricksHubState.deviceName || "Hub"} Ready`
+                        : remoteHubTakenByOther
+                          ? `${remoteHubHost?.userName || "Host"} controls the shared hub`
+                          : runtimeReady
+                            ? "Compiler Ready"
+                            : "Compiler Unavailable"
                     : runtimeReady
                       ? "Runtime Ready"
                       : "Runtime Unavailable"}
@@ -3711,7 +5248,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                     submitInputLine();
                   }
                 }}
-                disabled={!running}
+                disabled={!running || isRemoteHubGuestMode}
               />
             </div>
           </div>
@@ -3734,6 +5271,83 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
             {currentFile?.name && <span className="editor-statusbar-file">{currentFile.name}</span>}
           </div>
         </div>
+
+        {isMobileViewport && (
+          <nav className="editor-mobile-bar" aria-label="Editor mobile actions">
+            {!isViewerMode && (
+              <button
+                type="button"
+                className={`editor-mobile-tool ${sidebarOpen ? "active" : ""}`}
+                onClick={() => {
+                  setActiveSidebarScreen("");
+                  setCreateFileMenuOpen(false);
+                  setSidebarOpen(true);
+                }}
+                aria-label="Open files and project tools"
+              >
+                <FiMenu size={17} />
+                <span>Files</span>
+              </button>
+            )}
+            {!isViewerMode && (
+              <button
+                type="button"
+                className={`editor-mobile-tool ${sessionChatOpen ? "active" : ""}`}
+                onClick={() => setSessionChatOpen((prev) => !prev)}
+                aria-label="Toggle session chat"
+              >
+                <FiMessageSquare size={17} />
+                <span>Chat</span>
+              </button>
+            )}
+            <button
+              type="button"
+              className="editor-mobile-tool editor-mobile-run"
+              disabled={runDisabled}
+              onClick={runCode}
+              aria-label={runButtonLabel}
+              title={runButtonLabel}
+            >
+              {running ? (
+                <span className="editor-mobile-spinner" aria-hidden="true" />
+              ) : (
+                <FiPlay size={18} fill="currentColor" />
+              )}
+              <span>{mobileRunLabel}</span>
+            </button>
+            <button
+              type="button"
+              className="editor-mobile-tool"
+              disabled={!running}
+              onClick={stopCode}
+              aria-label="Stop current run"
+            >
+              <FiSquare size={16} />
+              <span>Stop</span>
+            </button>
+            <button
+              type="button"
+              className={`editor-mobile-tool ${terminalOpen ? "active" : ""}`}
+              onClick={() => setTerminalOpen((prev) => !prev)}
+              aria-label={terminalOpen ? "Hide terminal" : "Show terminal"}
+            >
+              <FiTerminal size={17} />
+              <span>Console</span>
+            </button>
+            <button
+              type="button"
+              className="editor-mobile-tool"
+              onClick={() => {
+                setCommandPaletteQuery("");
+                setCommandPaletteOpen(true);
+              }}
+              aria-label="Open command center"
+            >
+              <FiSearch size={17} />
+              <span>More</span>
+            </button>
+          </nav>
+        )}
       </main>
 
       {/* Session Chat Panel (ephemeral – no data saved) */}
@@ -3741,9 +5355,9 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         {sessionChatOpen && (
           <motion.aside
             className="ai-panel session-chat-panel"
-            initial={{ width: 0, opacity: 0 }}
-            animate={{ width: 360, opacity: 1 }}
-            exit={{ width: 0, opacity: 0 }}
+            initial={isMobileViewport ? { x: "100%", opacity: 0 } : { width: 0, opacity: 0 }}
+            animate={isMobileViewport ? { x: 0, opacity: 1 } : { width: 360, opacity: 1 }}
+            exit={isMobileViewport ? { x: "100%", opacity: 0 } : { width: 0, opacity: 0 }}
             transition={{ duration: 0.25, ease: "circOut" }}
           >
             <div className="ai-panel-header session-chat-header">
@@ -3804,6 +5418,22 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
           </motion.aside>
         )}
       </AnimatePresence>
+
+      <CheckpointInspectorModal
+        open={Boolean(checkpointInspectorSnapshot)}
+        snapshot={checkpointInspection?.snapshot || checkpointInspectorSnapshot}
+        inspection={checkpointInspection}
+        loading={loadingCheckpointInspection}
+        loadError={checkpointInspectionError}
+        canEdit={canEdit}
+        restoreBusy={restoringSnapshotId === checkpointInspectorSnapshot?.id}
+        onClose={closeCheckpointInspector}
+        onRefresh={refreshCheckpointInspector}
+        onRestoreFull={() => restoreSnapshot(checkpointInspection?.snapshot || checkpointInspectorSnapshot)}
+        onRestoreSelected={(fileNames, options) =>
+          restoreSelectedSnapshotFiles(checkpointInspection?.snapshot || checkpointInspectorSnapshot, fileNames, options)
+        }
+      />
 
       <CommandPalette
         open={commandPaletteOpen}

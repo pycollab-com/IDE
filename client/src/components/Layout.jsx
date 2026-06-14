@@ -155,9 +155,11 @@ export default function Layout({ user, onLogout, theme, toggleTheme, children, n
             <button onClick={toggleTheme} className="btn-ghost nav-icon-btn">
               {theme === "dark" ? <FiFullSun size={18} /> : <FiMoon size={18} />}
             </button>
-            <button onClick={onLogout} className="btn-ghost nav-icon-btn danger" title="Log out">
-              <FiLogOut size={18} />
-            </button>
+            {!user?.is_banned && (
+              <button onClick={onLogout} className="btn-ghost nav-icon-btn danger" title="Log out">
+                <FiLogOut size={18} />
+              </button>
+            )}
           </div>
         </div>
       </aside> : null}

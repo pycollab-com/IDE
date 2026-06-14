@@ -1,0 +1,142 @@
+:root {
+  --bg: #121113;
+  --sage: #899878;
+  --sage-soft: #9caa88;
+  --button-text: #f5f6ef;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  min-height: 100svh;
+  background: var(--bg);
+  font-family: "SF Pro Display", "SF Pro Text", "SF Pro", -apple-system, BlinkMacSystemFont,
+    "Segoe UI", sans-serif;
+  color: var(--sage);
+}
+
+.viewport-frame {
+  width: 100%;
+  min-height: 100svh;
+}
+
+.hero-stage {
+  position: relative;
+  width: 100vw;
+  min-height: 100svh;
+  height: 100svh;
+  overflow: hidden;
+  background: var(--bg);
+}
+
+.hero-artboard {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  width: max(100vw, calc(100svh * 820 / 607));
+  height: max(100svh, calc(100vw * 607 / 820));
+  transform: translate(-50%, -50%);
+}
+
+.brand-mark {
+  position: absolute;
+  top: clamp(26px, 6vh, 56px);
+  left: clamp(24px, 4.2vw, 56px);
+  z-index: 3;
+  font-size: clamp(18px, 2.6vw, 26px);
+  line-height: 1;
+  font-weight: 700;
+  letter-spacing: -0.052em;
+  color: var(--sage);
+}
+
+.hero-artwork {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.hero-lockup {
+  position: absolute;
+  top: clamp(138px, 22vh, 198px);
+  left: 50%;
+  z-index: 3;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  transform: translateX(-50%);
+  width: 100%;
+  padding: 0 20px;
+  text-align: center;
+}
+
+.app-logo {
+  width: clamp(126px, 13vw, 170px);
+  height: auto;
+  filter: drop-shadow(0 1px 0 rgba(255, 255, 255, 0.1))
+    drop-shadow(0 10px 14px rgba(0, 0, 0, 0.36));
+}
+
+h1 {
+  margin: clamp(20px, 4vh, 34px) 0 0;
+  font-size: clamp(44px, 5.9vw, 66px);
+  line-height: 0.94;
+  font-weight: 700;
+  letter-spacing: -0.06em;
+  color: var(--sage);
+}
+
+.download-button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: clamp(40px, 5.3vh, 46px);
+  margin-top: clamp(18px, 3vh, 24px);
+  border: 0;
+  border-radius: 999px;
+  background: var(--sage-soft);
+  padding: 0 clamp(14px, 1.9vw, 20px) 1px;
+  font-family: "SF Pro Text", "SF Pro", -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  font-size: clamp(16px, 2vw, 20px);
+  font-weight: 400;
+  letter-spacing: -0.03em;
+  color: var(--button-text);
+  cursor: pointer;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.08) inset;
+  transition: transform 160ms ease, filter 160ms ease;
+}
+
+.download-button:hover {
+  filter: brightness(1.02);
+  transform: translateY(-1px);
+}
+
+.download-button:focus-visible {
+  outline: 2px solid rgba(245, 246, 239, 0.8);
+  outline-offset: 3px;
+}
+
+@media (max-width: 640px) {
+  .brand-mark {
+    top: 24px;
+    left: 20px;
+    font-size: 17px;
+  }
+
+  .hero-lockup {
+    top: 108px;
+  }
+
+  h1 {
+    font-size: clamp(36px, 10vw, 46px);
+  }
+}

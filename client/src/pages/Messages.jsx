@@ -18,10 +18,10 @@ import {
   FiChevronLeft,
 } from "react-icons/fi";
 import VerifiedBadge from "../components/VerifiedBadge";
+import { loadStoredUser } from "../session";
 import { toProfilePath } from "../utils/profileLinks";
 import { motion } from "framer-motion";
 import { resolveHostedAssetUrl } from "../utils/hostedAssets";
-import { loadStoredUser } from "../session";
 
 const REALTIME_PARTY = import.meta.env.VITE_PARTYKIT_PARTY || "messages";
 const REALTIME_HOST = import.meta.env.VITE_PARTYKIT_HOST || (typeof window !== "undefined" ? window.location.host : "");
