@@ -164,14 +164,14 @@ export default function Settings({ user: currentUser, onLogout }) {
       // Only send if there are changes
       if (Object.keys(payload).length > 0) {
         const res = await api.patch("/users/me", payload);
-        storeUser(res.data);
-        setBaselineUser(res.data);
+        const persistedUser = storeUser(res.data);
+        setBaselineUser(persistedUser);
         setFormData({
-          display_name: res.data.display_name || "",
-          username: res.data.username || "",
-          email: res.data.email || "",
-          description: res.data.description || "",
-          links: Array.isArray(res.data.links) ? res.data.links : [],
+          display_name: persistedUser.display_name || "",
+          username: persistedUser.username || "",
+          email: persistedUser.email || "",
+          description: persistedUser.description || "",
+          links: Array.isArray(persistedUser.links) ? persistedUser.links : [],
           password: "",
         });
         setMessage("Profile updated successfully");
@@ -195,8 +195,7 @@ export default function Settings({ user: currentUser, onLogout }) {
     }
     setGoogleLoading(true);
     try {
-      const updated = await verifyEmailWithGoogle(idToken);
-      storeUser(updated);
+      const updated = storeUser(await verifyEmailWithGoogle(idToken));
       setBaselineUser(updated);
       setFormData((prev) => ({ ...prev, email: updated.email || "" }));
       setMessage("Email verified with Google");
@@ -213,8 +212,7 @@ export default function Settings({ user: currentUser, onLogout }) {
       setError(null);
       setMessage(null);
       const res = await api.patch("/users/me", { email: "" });
-      storeUser(res.data);
-      setBaselineUser(res.data);
+      setBaselineUser(storeUser(res.data));
       setFormData((prev) => ({ ...prev, email: "" }));
       setMessage("Email removed");
     } catch (err) {
@@ -236,8 +234,9 @@ export default function Settings({ user: currentUser, onLogout }) {
       const res = await api.put("/users/me/picture", form, {
         headers: { "Content-Type": "multipart/form-data" },
       });
-      storeUser(res.data);
-      setPfpPreview(resolveHostedAssetUrl(res.data.profile_picture_path));
+      const persistedUser = storeUser(res.data);
+      setBaselineUser(persistedUser);
+      setPfpPreview(resolveHostedAssetUrl(persistedUser.profile_picture_path));
       setMessage("Profile picture updated");
     } catch (err) {
       setError("Failed to upload picture");

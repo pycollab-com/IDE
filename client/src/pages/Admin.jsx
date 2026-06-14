@@ -50,19 +50,17 @@ export default function AdminPage({ user }) {
             const pRes = await api.get("/admin/api/projects");
             setProjects(pRes.data);
         } catch (e) {
+            if (e?.response?.status === 401 || e?.response?.status === 403) {
+                navigate("/");
+                return;
+            }
             alert(extractErrorDetail(e, "Failed to load admin data"));
         }
-    }, []);
+    }, [navigate]);
 
     useEffect(() => {
-        if (user && !user.is_admin) {
-            navigate("/");
-            return;
-        }
-        if (user?.is_admin) {
-            loadData();
-        }
-    }, [user, navigate, loadData]);
+        loadData();
+    }, [loadData]);
 
     const deleteUser = async (id) => {
         if (!confirm("Delete user? This will delete all their projects.")) return;
@@ -81,6 +79,21 @@ export default function AdminPage({ user }) {
             await loadData();
         } catch (e) {
             alert(extractErrorDetail(e, "Failed to delete project"));
+        }
+    };
+
+    const setBanState = async (targetUser, nextBanned) => {
+        const action = nextBanned ? "ban" : "unban";
+        const promptText = nextBanned
+            ? `Ban ${targetUser.username}? This will lock the account, hide the profile, and make their projects inaccessible without deleting data.`
+            : `Unban ${targetUser.username}?`;
+        if (!confirm(promptText)) return;
+        try {
+            const res = await api.post(`/admin/api/users/${targetUser.id}/${action}`);
+            setUsers((prev) => prev.map((entry) => (entry.id === targetUser.id ? res.data : entry)));
+            await loadData();
+        } catch (e) {
+            alert(extractErrorDetail(e, `Failed to ${action} user`));
         }
     };
 
@@ -140,6 +153,7 @@ export default function AdminPage({ user }) {
             const payload = {
                 username: editingUser.username,
                 display_name: editingUser.display_name,
+                is_banned: Boolean(editingUser.is_banned),
             };
             if (editingUser.password) {
                 payload.password = editingUser.password;
@@ -268,11 +282,14 @@ export default function AdminPage({ user }) {
                                         <td style={{ fontSize: 13 }}>{formatDate(u.created_at)}</td>
                                         {/* Password cell removed */}
                                         <td>
-                                            {u.is_admin ? (
-                                                <span className="chip chip-success">Admin</span>
-                                            ) : (
-                                                <span className="chip chip-muted">User</span>
-                                            )}
+                                            <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                                                {u.is_admin ? (
+                                                    <span className="chip chip-success">Admin</span>
+                                                ) : (
+                                                    <span className="chip chip-muted">User</span>
+                                                )}
+                                                {u.is_banned && <span className="chip" style={{ background: "var(--danger)", color: "#fff" }}>Banned</span>}
+                                            </div>
                                         </td>
                                         <td onClick={e => e.stopPropagation()}>
                                             <div style={{ display: 'flex', gap: 8 }}>
@@ -281,9 +298,18 @@ export default function AdminPage({ user }) {
                                                     style={{ color: 'var(--primary)', padding: 8, borderRadius: '50%' }}
                                                     onClick={() => impersonateUser(u)}
                                                     title="Impersonate User"
-                                                    disabled={u.is_admin}
+                                                    disabled={u.is_admin || u.is_banned}
                                                 >
                                                     <FiUserCheck />
+                                                </button>
+                                                <button
+                                                    className="btn-ghost"
+                                                    style={{ color: u.is_banned ? "var(--primary)" : "var(--danger)", padding: 8, borderRadius: '50%' }}
+                                                    onClick={() => setBanState(u, !u.is_banned)}
+                                                    disabled={u.is_admin}
+                                                    title={u.is_banned ? "Unban User" : "Ban User"}
+                                                >
+                                                    {u.is_banned ? <FiCheck /> : <FiX />}
                                                 </button>
                                                 <button
                                                     className="btn-ghost"
@@ -315,6 +341,15 @@ export default function AdminPage({ user }) {
                                                     <button className="btn-secondary" style={{ fontSize: 13 }} onClick={() => forceFollow(u.id)}>
                                                         <FiUser style={{ marginRight: 8 }} /> Force Follow...
                                                     </button>
+                                                    {!u.is_admin && (
+                                                        <button
+                                                            className={u.is_banned ? "btn-secondary" : "btn"}
+                                                            style={{ fontSize: 13 }}
+                                                            onClick={() => setBanState(u, !u.is_banned)}
+                                                        >
+                                                            {u.is_banned ? "Unban Account" : "Ban Account"}
+                                                        </button>
+                                                    )}
                                                 </div>
                                                 <h4 style={{ margin: "0 0 var(--space-4)", display: 'flex', alignItems: 'center', gap: 8 }}>
                                                     <FiFolder /> Projects by {u.display_name}
@@ -424,6 +459,16 @@ export default function AdminPage({ user }) {
                                     <label className="muted" style={{ fontSize: 12, marginBottom: 4, display: 'block' }}>New Password (optional)</label>
                                     <input className="input" type="password" placeholder="Leave blank to keep unchanged" value={editingUser.password} onChange={e => setEditingUser({ ...editingUser, password: e.target.value })} />
                                 </div>
+                                {!editingUser.is_admin && (
+                                    <label style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                                        <input
+                                            type="checkbox"
+                                            checked={Boolean(editingUser.is_banned)}
+                                            onChange={(e) => setEditingUser({ ...editingUser, is_banned: e.target.checked })}
+                                        />
+                                        <span>Account is banned</span>
+                                    </label>
+                                )}
                                 <div style={{ display: 'flex', justifyContent: 'flex-end', marginTop: "var(--space-4)", gap: "var(--space-2)" }}>
                                     <button type="button" className="btn-secondary" onClick={() => setEditingUser(null)}>Cancel</button>
                                     <button type="submit" className="btn" style={{ display: 'flex', alignItems: 'center', gap: 8 }}><FiCheck /> Save</button>

@@ -131,6 +131,7 @@ export default function Dashboard({ user, hostedOnline = true, desktopContext = 
               const isRenaming = d.renamingProjectId === project.id;
               const isMenuOpen = openMenuProjectId === project.id;
               const menuDisabled = actionsDisabled && !isOfflineCopy;
+              const canManageProject = Boolean(project.permissions?.can_manage);
 
               return (
                 <motion.article
@@ -158,10 +159,12 @@ export default function Dashboard({ user, hostedOnline = true, desktopContext = 
 
                       {isMenuOpen && (
                         <div className="dv5-card-menu-panel">
-                          <button type="button" className="dv5-menu-item" onClick={(event) => handleRenameStart(event, project)}>
-                            <FiEdit2 size={14} />
-                            Rename project
-                          </button>
+                          {(isOfflineCopy || canManageProject) && (
+                            <button type="button" className="dv5-menu-item" onClick={(event) => handleRenameStart(event, project)}>
+                              <FiEdit2 size={14} />
+                              Rename project
+                            </button>
+                          )}
                           {!isOfflineCopy ? (
                             <button
                               type="button"
@@ -173,10 +176,12 @@ export default function Dashboard({ user, hostedOnline = true, desktopContext = 
                               Duplicate
                             </button>
                           ) : null}
-                          <button type="button" className="dv5-menu-item danger" onClick={(event) => handleDelete(event, project)}>
-                            <FiTrash2 size={14} />
-                            Delete
-                          </button>
+                          {(isOfflineCopy || canManageProject) && (
+                            <button type="button" className="dv5-menu-item danger" onClick={(event) => handleDelete(event, project)}>
+                              <FiTrash2 size={14} />
+                              Delete
+                            </button>
+                          )}
                         </div>
                       )}
                     </div>

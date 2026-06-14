@@ -1,0 +1,58 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>PyCollab IDE</title>
+    <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg'/%3E" />
+    <link rel="stylesheet" href="/app/styles.css" />
+  </head>
+  <body>
+    <main class="viewport-frame">
+      <section class="hero-stage" aria-label="PyCollab landing page">
+        <div class="hero-artboard" aria-hidden="true">
+          <svg class="hero-artwork" viewBox="0 0 820 607">
+            <rect width="820" height="607" fill="#121113" />
+            <path
+              fill="#899878"
+              d="M301 0H820V353C804 364 780 368 753 367C711 365 675 349 635 326L462 229C399 193 352 160 320 123C287 84 273 39 301 0Z"
+            />
+            <path
+              fill="#899878"
+              d="M0 284C97 269 188 323 210 417C220 460 211 498 194 536L139 607H0Z"
+            />
+          </svg>
+        </div>
+
+        <a class="brand-mark" href="/">PyCollab</a>
+
+        <div class="hero-lockup">
+          <img
+            class="app-logo"
+            src="/app/PyCollab%20logo.png"
+            alt="PyCollab logo"
+            width="148"
+            height="148"
+          />
+          <h1>PyCollab IDE</h1>
+      <button
+            class="download-button"
+            type="button"
+            aria-label="Download PyCollab for macOS"
+            id="download-button"
+          >
+            Download for macOS
+          </button>
+        </div>
+      </section>
+    </main>
+    <script>
+      const downloadUrl =
+        "https://github.com/pycollab-com/IDE/releases/latest/download/PyCollab.IDE.dmg";
+
+      document.getElementById("download-button").addEventListener("click", () => {
+        window.location.href = downloadUrl;
+      });
+    </script>
+  </body>
+</html>

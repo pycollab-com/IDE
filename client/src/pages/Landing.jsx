@@ -647,7 +647,6 @@ export default function Landing({ theme, toggleTheme }) {
           </div>
           <div className="footer-links-col">
             <span className="footer-col-head">Company</span>
-            <a href="/docs">Docs</a>
             <a href="/support">Support</a>
           </div>
           <div className="footer-links-col">
