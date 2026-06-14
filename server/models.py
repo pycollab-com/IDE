@@ -45,6 +45,7 @@ class User(Base):
     created_at = Column(DateTime, default=dt.datetime.utcnow, nullable=False)
     display_name = Column(String, default="User", nullable=False, index=True)
     is_admin = Column(Boolean, default=False, nullable=False)
+    is_banned = Column(Boolean, default=False, nullable=False, server_default=text("false"))
     
     # Profile fields
     bio = Column(Text, nullable=True)
@@ -103,6 +104,7 @@ class Project(Base):
 
     owner = relationship("User", back_populates="projects")
     files = relationship("ProjectFile", back_populates="project", cascade="all, delete-orphan")
+    folders = relationship("ProjectFolder", back_populates="project", cascade="all, delete-orphan")
     block_documents = relationship(
         "ProjectBlockDocument",
         back_populates="project",
@@ -132,12 +134,31 @@ class ProjectFile(Base):
     project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
     name = Column(String, nullable=False)
     content = Column(Text, default="", nullable=False)
+    sort_order = Column(Integer, default=0, nullable=False, server_default=text("0"))
     created_at = Column(DateTime, default=dt.datetime.utcnow, nullable=False)
     updated_at = Column(DateTime, default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow, nullable=False)
 
     project = relationship("Project", back_populates="files")
 
     __table_args__ = (UniqueConstraint("project_id", "name", name="uq_project_file_name"),)
+
+
+class ProjectFolder(Base):
+    __tablename__ = "project_folders"
+
+    id = Column(Integer, primary_key=True, index=True)
+    project_id = Column(Integer, ForeignKey("projects.id"), nullable=False, index=True)
+    path = Column(String, nullable=False)
+    sort_order = Column(Integer, default=0, nullable=False, server_default=text("0"))
+    created_at = Column(DateTime, default=dt.datetime.utcnow, nullable=False)
+    updated_at = Column(DateTime, default=dt.datetime.utcnow, onupdate=dt.datetime.utcnow, nullable=False)
+
+    project = relationship("Project", back_populates="folders")
+
+    __table_args__ = (
+        UniqueConstraint("project_id", "path", name="uq_project_folder_path"),
+        Index("ix_project_folders_project_path", "project_id", "path"),
+    )
 
 
 class ProjectBlockDocument(Base):

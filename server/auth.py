@@ -10,8 +10,27 @@ from sqlalchemy.orm import Session
 from .database import SessionLocal
 from . import models
 
-SECRET_KEY = os.getenv("SECRET_KEY", "super-secret-key-change-me")
+_UNSAFE_SECRET_KEYS = {
+    "",
+    "change-me",
+    "super-secret-key-change-me",
+    "replace-me",
+    "replace-with-a-random-secret",
+}
+
+
+def _load_secret_key() -> str:
+    secret_key = os.getenv("SECRET_KEY", "").strip()
+    if secret_key.lower() in _UNSAFE_SECRET_KEYS or len(secret_key) < 32:
+        raise RuntimeError(
+            "SECRET_KEY must be set to a non-default random value of at least 32 characters."
+        )
+    return secret_key
+
+
+SECRET_KEY = _load_secret_key()
 ALGORITHM = "HS256"
+BANNED_ACCOUNT_DETAIL = "Your account has been banned. Contact support@pycollab.com to appeal."
 ACCESS_TOKEN_EXPIRE_MINUTES = 60 * 24 * 7
 _raw_google_signup_expire_minutes = os.getenv("GOOGLE_SIGNUP_TOKEN_EXPIRE_MINUTES", "15").strip()
 try:
@@ -90,6 +109,11 @@ def get_current_user(token: str = Depends(oauth2_scheme), db: Session = Depends(
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if user is None:
         raise credentials_exception
+    if user.is_banned:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail=BANNED_ACCOUNT_DETAIL,
+        )
     
     # Check for impersonation
     impersonator_id = payload.get("impersonator_id")
@@ -115,4 +139,7 @@ def get_optional_user(token: Optional[str] = Depends(oauth2_scheme_optional), db
             return None
     except JWTError:
         return None
-    return db.query(models.User).filter(models.User.id == user_id).first()
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if user is None or user.is_banned:
+        return None
+    return user

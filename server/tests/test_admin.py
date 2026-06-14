@@ -6,6 +6,7 @@ from jose import jwt
 from sqlalchemy import create_engine, or_
 from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
+from unittest.mock import AsyncMock
 
 os.environ["DATABASE_URL"] = "sqlite://"
 
@@ -263,3 +264,125 @@ def test_delete_me_cleans_related_rows(client, db):
     assert db.query(models.Message).filter(models.Message.sender_id == target.id).count() == 0
     assert db.query(models.Presence).filter(models.Presence.user_id == target.id).count() == 0
     assert db.query(models.UserCredential).filter(models.UserCredential.user_id == target.id).count() == 0
+
+
+def test_admin_can_ban_and_unban_user_without_deleting_data(client, db):
+    admin = _create_user(db, "admin", is_admin=True)
+    target = _create_user(db, "target")
+    project = models.Project(name="public-project", owner_id=target.id, is_public=True, share_pin="abc123")
+    db.add(project)
+    db.commit()
+    db.refresh(project)
+
+    ban_res = client.post(f"/admin/users/{target.id}/ban", headers=_auth_header(admin.id))
+    assert ban_res.status_code == 200
+    db.refresh(target)
+    db.refresh(project)
+    assert target.is_banned is True
+    assert project.is_public is False
+    assert project.share_pin is None
+
+    protected_res = client.get("/projects", headers=_auth_header(target.id))
+    assert protected_res.status_code == 403
+    assert "banned" in protected_res.json()["detail"].lower()
+
+    unban_res = client.post(f"/admin/users/{target.id}/unban", headers=_auth_header(admin.id))
+    assert unban_res.status_code == 200
+    db.refresh(target)
+    assert target.is_banned is False
+    assert db.query(models.Project).filter(models.Project.id == project.id).first() is not None
+
+
+def test_banned_user_can_log_in_but_cannot_access_authenticated_routes(client, db):
+    admin = _create_user(db, "admin", is_admin=True)
+    target = _create_user(db, "target")
+
+    ban_res = client.post(f"/admin/users/{target.id}/ban", headers=_auth_header(admin.id))
+    assert ban_res.status_code == 200
+
+    login_res = client.post("/auth/login", data={"username": "target", "password": "pw"})
+    assert login_res.status_code == 200
+    login_payload = login_res.json()
+    assert login_payload["user"]["is_banned"] is True
+
+    me_res = client.get(
+        "/users/me",
+        headers={"Authorization": f"Bearer {login_payload['access_token']}"},
+    )
+    assert me_res.status_code == 403
+    assert "support@pycollab.com" in me_res.json()["detail"]
+
+    profile_res = client.get(f"/users/{target.id}")
+    assert profile_res.status_code == 404
+
+
+def test_banned_users_are_hidden_from_search_and_public_projects(client, db):
+    admin = _create_user(db, "admin", is_admin=True)
+    target = _create_user(db, "target")
+    visible = _create_user(db, "visible")
+    db.add(models.Project(name="banned-public", owner_id=target.id, is_public=True))
+    db.add(models.Project(name="visible-public", owner_id=visible.id, is_public=True))
+    db.commit()
+
+    ban_res = client.post(f"/admin/users/{target.id}/ban", headers=_auth_header(admin.id))
+    assert ban_res.status_code == 200
+
+    search_res = client.get("/users/search", params={"q": "tar"})
+    assert search_res.status_code == 200
+    assert search_res.json() == []
+
+    explore_res = client.get("/projects/explore/all")
+    assert explore_res.status_code == 200
+    project_names = [project["name"] for project in explore_res.json()]
+    assert "banned-public" not in project_names
+    assert "visible-public" in project_names
+
+
+def test_banning_disconnects_active_socket_sessions(client, db, monkeypatch):
+    admin = _create_user(db, "admin", is_admin=True)
+    target = _create_user(db, "target")
+
+    import server.main as main_module
+
+    main_module._sid_info["project_sid"] = {
+        "user_id": target.id,
+        "is_admin": False,
+        "project_id": 123,
+        "can_edit": True,
+        "name": "Target",
+    }
+    main_module.message_sid_info["message_sid"] = target.id
+
+    disconnect_mock = AsyncMock()
+    monkeypatch.setattr(main_module.sio, "disconnect", disconnect_mock)
+
+    res = client.post(f"/admin/users/{target.id}/ban", headers=_auth_header(admin.id))
+    assert res.status_code == 200
+    assert main_module._sid_info["project_sid"]["can_edit"] is False
+    assert main_module._sid_info["project_sid"]["is_banned"] is True
+    disconnect_mock.assert_any_call("project_sid")
+    disconnect_mock.assert_any_call("message_sid", namespace=main_module.MESSAGING_NAMESPACE)
+
+
+def test_projects_endpoint_excludes_projects_owned_by_banned_users(client, db):
+    owner = _create_user(db, "owner")
+    banned_owner = _create_user(db, "bannedowner")
+
+    visible_project = models.Project(name="visible", owner_id=owner.id, description="x")
+    banned_project = models.Project(name="hidden", owner_id=banned_owner.id, description="y")
+    db.add(visible_project)
+    db.add(banned_project)
+    db.commit()
+    db.refresh(visible_project)
+    db.refresh(banned_project)
+
+    db.add(models.ProjectCollaborator(project_id=visible_project.id, user_id=owner.id, role="editor"))
+    db.add(models.ProjectCollaborator(project_id=banned_project.id, user_id=owner.id, role="editor"))
+    banned_owner.is_banned = True
+    db.commit()
+
+    res = client.get("/projects", headers=_auth_header(owner.id))
+    assert res.status_code == 200
+    names = [project["name"] for project in res.json()]
+    assert "visible" in names
+    assert "hidden" not in names

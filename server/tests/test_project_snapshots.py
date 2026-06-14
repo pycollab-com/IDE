@@ -125,6 +125,8 @@ def test_snapshot_create_restore_and_delete_roundtrip():
     assert restore_snapshot.status_code == 200
     assert restore_snapshot.json()["status"] == "restored"
     assert restore_snapshot.json()["updated_files"] == 2
+    assert restore_snapshot.json()["restore_scope"] == "full"
+    assert restore_snapshot.json()["safety_snapshot"]["name"] == "Before restoring checkpoint: Baseline"
 
     project_after_restore = client.get(f"/projects/{project_id}", headers=owner_headers)
     assert project_after_restore.status_code == 200
@@ -144,14 +146,151 @@ def test_snapshot_create_restore_and_delete_roundtrip():
 
     list_snapshots = client.get(f"/projects/{project_id}/snapshots", headers=owner_headers)
     assert list_snapshots.status_code == 200
-    assert len(list_snapshots.json()) == 1
+    snapshots_after_restore = list_snapshots.json()
+    assert len(snapshots_after_restore) == 2
 
     delete_snapshot = client.delete(f"/projects/{project_id}/snapshots/{snapshot_id}", headers=owner_headers)
     assert delete_snapshot.status_code == 200
 
+    safety_snapshot_id = next(
+        entry["id"]
+        for entry in snapshots_after_restore
+        if entry["name"] == "Before restoring checkpoint: Baseline"
+    )
+    delete_safety_snapshot = client.delete(
+        f"/projects/{project_id}/snapshots/{safety_snapshot_id}",
+        headers=owner_headers,
+    )
+    assert delete_safety_snapshot.status_code == 200
+
     list_after_delete = client.get(f"/projects/{project_id}/snapshots", headers=owner_headers)
     assert list_after_delete.status_code == 200
     assert list_after_delete.json() == []
+
+    client.close()
+    _clear_realtime_file_state()
+
+
+def test_snapshot_inspect_and_partial_restore():
+    _clear_realtime_file_state()
+    client = TestClient(app)
+    owner_headers, _ = _register_user(client)
+
+    create_project = client.post(
+        "/projects",
+        json={"name": "Snapshot Inspector Lab", "description": "inspect test", "is_public": True},
+        headers=owner_headers,
+    )
+    assert create_project.status_code == 200
+    project = create_project.json()
+    project_id = project["id"]
+    main_file = _project_file_by_name(project, "main.py")
+    assert main_file is not None
+
+    set_main_v1 = client.patch(
+        f"/projects/{project_id}/files/{main_file['id']}",
+        json={"content": "print('main-v1')"},
+        headers=owner_headers,
+    )
+    assert set_main_v1.status_code == 200
+
+    create_helper = client.post(
+        f"/projects/{project_id}/files",
+        json={"name": "helpers.py", "content": "print('helper-v1')"},
+        headers=owner_headers,
+    )
+    assert create_helper.status_code == 200
+    helper_file = create_helper.json()
+
+    create_stable = client.post(
+        f"/projects/{project_id}/files",
+        json={"name": "stable.py", "content": "print('stable-v1')"},
+        headers=owner_headers,
+    )
+    assert create_stable.status_code == 200
+
+    create_snapshot = client.post(
+        f"/projects/{project_id}/snapshots",
+        json={"name": "Before changes"},
+        headers=owner_headers,
+    )
+    assert create_snapshot.status_code == 200
+    snapshot_id = create_snapshot.json()["id"]
+
+    mutate_main = client.patch(
+        f"/projects/{project_id}/files/{main_file['id']}",
+        json={"content": "print('main-v2')"},
+        headers=owner_headers,
+    )
+    assert mutate_main.status_code == 200
+
+    delete_helper = client.delete(
+        f"/projects/{project_id}/files/{helper_file['id']}",
+        headers=owner_headers,
+    )
+    assert delete_helper.status_code == 200
+
+    create_current_only = client.post(
+        f"/projects/{project_id}/files",
+        json={"name": "current_only.py", "content": "print('added-now')"},
+        headers=owner_headers,
+    )
+    assert create_current_only.status_code == 200
+
+    inspect_snapshot = client.get(
+        f"/projects/{project_id}/snapshots/{snapshot_id}/inspect",
+        headers=owner_headers,
+    )
+    assert inspect_snapshot.status_code == 200
+    inspection = inspect_snapshot.json()
+    assert inspection["changed_file_count"] == 3
+
+    files_by_name = {entry["file_name"]: entry for entry in inspection["files"]}
+    assert files_by_name["main.py"]["status"] == "modified"
+    assert files_by_name["main.py"]["snapshot_content"] == "print('main-v1')"
+    assert files_by_name["main.py"]["current_content"] == "print('main-v2')"
+    assert files_by_name["helpers.py"]["status"] == "deleted"
+    assert files_by_name["current_only.py"]["status"] == "added"
+    assert files_by_name["stable.py"]["status"] == "unchanged"
+
+    delete_without_confirmation = client.post(
+        f"/projects/{project_id}/snapshots/{snapshot_id}/restore",
+        json={"file_names": ["current_only.py"], "create_safety_snapshot": False},
+        headers=owner_headers,
+    )
+    assert delete_without_confirmation.status_code == 400
+
+    partial_restore = client.post(
+        f"/projects/{project_id}/snapshots/{snapshot_id}/restore",
+        json={
+            "file_names": ["helpers.py", "current_only.py"],
+            "allow_added_file_deletions": True,
+            "create_safety_snapshot": False,
+        },
+        headers=owner_headers,
+    )
+    assert partial_restore.status_code == 200
+    payload = partial_restore.json()
+    assert payload["restore_scope"] == "partial"
+    assert payload["updated_files"] == 2
+    assert payload["safety_snapshot"] is None
+
+    project_after_restore = client.get(f"/projects/{project_id}", headers=owner_headers)
+    assert project_after_restore.status_code == 200
+    restored = project_after_restore.json()
+
+    restored_main = _project_file_by_name(restored, "main.py")
+    restored_helper = _project_file_by_name(restored, "helpers.py")
+    restored_current_only = _project_file_by_name(restored, "current_only.py")
+    restored_stable = _project_file_by_name(restored, "stable.py")
+
+    assert restored_main is not None
+    assert restored_main["content"] == "print('main-v2')"
+    assert restored_helper is not None
+    assert restored_helper["content"] == "print('helper-v1')"
+    assert restored_current_only is None
+    assert restored_stable is not None
+    assert restored_stable["content"] == "print('stable-v1')"
 
     client.close()
     _clear_realtime_file_state()
@@ -300,6 +439,12 @@ def test_snapshot_permissions_for_collaborator_and_viewer():
         headers=collaborator_headers,
     )
     assert collaborator_export.status_code == 200
+
+    outsider_inspect = client.get(
+        f"/projects/{project_id}/snapshots/{snapshot_id}/inspect",
+        headers=outsider_headers,
+    )
+    assert outsider_inspect.status_code == 403
 
     outsider_list = client.get(f"/projects/{project_id}/snapshots", headers=outsider_headers)
     assert outsider_list.status_code == 403

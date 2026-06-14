@@ -15,3 +15,6 @@ desktop/build/
 .DS_Store
 .env
 AGENTS.md
+.playwright/
+playwright-report/
+test-results/
