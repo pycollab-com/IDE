@@ -9,6 +9,8 @@ import secrets
 import datetime as dt
 import logging
 import zipfile
+from ipaddress import ip_address, ip_network
+from threading import Lock
 from urllib.parse import urlparse, urlunparse
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
@@ -27,7 +29,7 @@ from sqlalchemy import text, or_, and_, func
 from sqlalchemy.exc import IntegrityError
 from fastapi import Depends, FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, Response
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 
@@ -55,6 +57,11 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
+@app.get("/health")
+def healthcheck():
+    return {"status": "ok"}
+
 # Socket.IO setup
 sio = socketio.AsyncServer(async_mode="asgi", cors_allowed_origins="*")
 socket_app = socketio.ASGIApp(sio, other_asgi_app=app)
@@ -72,6 +79,20 @@ PRESENCE_STALE_SECONDS = 35
 PRESENCE_CHECK_INTERVAL_SECONDS = 10
 TYPING_THROTTLE_SECONDS = 1.0
 TYPING_TIMEOUT_SECONDS = 4.0
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return max(0, int(os.getenv(name, str(default))))
+    except (TypeError, ValueError):
+        return default
+
+
+RATE_LIMIT_WINDOW_SECONDS = 60.0
+RATE_LIMIT_BUCKET_TTL_SECONDS = max(RATE_LIMIT_WINDOW_SECONDS, float(_env_int("RATE_LIMIT_BUCKET_TTL_SECONDS", 300)))
+RATE_LIMIT_MAX_BUCKETS = max(1, _env_int("RATE_LIMIT_MAX_BUCKETS", 10000))
+AUTH_RATE_LIMIT_PER_MINUTE = _env_int("AUTH_RATE_LIMIT_PER_MINUTE", 10)
+JOIN_CODE_RATE_LIMIT_PER_MINUTE = _env_int("JOIN_CODE_RATE_LIMIT_PER_MINUTE", 10)
 SHARE_TOKEN_ALPHABET = "0123456789abcdefghijklmnopqrstuvwxyz"
 SHARE_TOKEN_LENGTH = 6
 SHARE_TOKEN_RE = re.compile(rf"^[{SHARE_TOKEN_ALPHABET}]{{{SHARE_TOKEN_LENGTH}}}$")
@@ -91,6 +112,8 @@ while True:
 """
 DEFAULT_BLOCK_DOCUMENT_NAME = "Blocks"
 BLOCK_WORKSPACE_VERSION = 1
+TREE_SORT_STEP = 1000
+PROJECT_TREE_PATH_MAX_LENGTH = 512
 PYBRICKS_BLOCKS_STARTER = json.dumps(
     {
         "blocks": {
@@ -138,12 +161,182 @@ typing_manager = TypingManager(
 )
 message_sid_info: Dict[str, int] = {}
 
+
+@dataclass
+class _RateLimitBucket:
+    timestamps: List[float] = field(default_factory=list)
+    last_access: float = 0.0
+
+
+_RATE_LIMIT_BUCKETS: Dict[str, _RateLimitBucket] = {}
+_RATE_LIMIT_LOCK = Lock()
+
 DB_STARTUP_MAX_ATTEMPTS = 8
 DB_STARTUP_RETRY_SECONDS = 2.0
 
 
 def _normalize_username(username: str) -> str:
     return username.strip().lower()
+
+
+def _parse_trusted_proxy_networks(raw_value: str) -> tuple:
+    networks = []
+    for raw_part in (raw_value or "").split(","):
+        part = raw_part.strip()
+        if not part:
+            continue
+        try:
+            networks.append(ip_network(part, strict=False))
+        except ValueError:
+            logger.warning("Ignoring invalid trusted proxy CIDR: %s", part)
+    return tuple(networks)
+
+
+TRUSTED_PROXY_NETWORKS = _parse_trusted_proxy_networks(
+    ",".join(
+        value
+        for value in (
+            os.getenv("TRUSTED_PROXY_CIDRS", ""),
+            os.getenv("TRUSTED_PROXIES", ""),
+        )
+        if value
+    )
+)
+
+
+def _normalize_ip(value: Optional[str]) -> Optional[str]:
+    raw_value = (value or "").strip()
+    if not raw_value:
+        return None
+    try:
+        return str(ip_address(raw_value))
+    except ValueError:
+        return None
+
+
+def _ip_is_trusted(value: Optional[str], trusted_proxy_networks: tuple) -> bool:
+    normalized = _normalize_ip(value)
+    if normalized is None:
+        return False
+    parsed = ip_address(normalized)
+    return any(parsed in network for network in trusted_proxy_networks)
+
+
+def _header_value(headers, name: str) -> Optional[str]:
+    if not headers:
+        return None
+    return headers.get(name) or headers.get(name.lower()) or headers.get(name.upper())
+
+
+def _resolve_client_host(
+    headers,
+    fallback_host: Optional[str],
+    trusted_proxy_networks: Optional[tuple] = None,
+) -> str:
+    fallback = _normalize_ip(fallback_host) or (fallback_host or "").strip() or "unknown"
+    trusted_networks = TRUSTED_PROXY_NETWORKS if trusted_proxy_networks is None else trusted_proxy_networks
+    if not trusted_networks or not _ip_is_trusted(fallback, trusted_networks):
+        return fallback
+
+    x_forwarded_for = _header_value(headers, "x-forwarded-for") or ""
+    forwarded_hosts = [entry.strip() for entry in x_forwarded_for.split(",") if entry.strip()]
+    for candidate in reversed(forwarded_hosts):
+        normalized_candidate = _normalize_ip(candidate)
+        if normalized_candidate and not _ip_is_trusted(normalized_candidate, trusted_networks):
+            return normalized_candidate
+
+    x_real_ip = _normalize_ip(_header_value(headers, "x-real-ip"))
+    if x_real_ip:
+        return x_real_ip
+
+    return fallback
+
+
+def _client_host(request: Request, trusted_proxy_networks: Optional[tuple] = None) -> str:
+    fallback_host = request.client.host if request.client and request.client.host else None
+    return _resolve_client_host(request.headers, fallback_host, trusted_proxy_networks)
+
+
+def _clear_rate_limit_buckets() -> None:
+    with _RATE_LIMIT_LOCK:
+        _RATE_LIMIT_BUCKETS.clear()
+
+
+def _sweep_rate_limit_buckets(now: float, protected_key: Optional[str] = None) -> None:
+    stale_before = now - RATE_LIMIT_BUCKET_TTL_SECONDS
+    stale_keys = [
+        key
+        for key, bucket in _RATE_LIMIT_BUCKETS.items()
+        if bucket.last_access <= stale_before
+    ]
+    for key in stale_keys:
+        _RATE_LIMIT_BUCKETS.pop(key, None)
+
+    overflow = len(_RATE_LIMIT_BUCKETS) - RATE_LIMIT_MAX_BUCKETS
+    if overflow <= 0:
+        return
+    oldest_keys = sorted(
+        (key for key in _RATE_LIMIT_BUCKETS if key != protected_key),
+        key=lambda key: _RATE_LIMIT_BUCKETS[key].last_access,
+    )[:overflow]
+    for key in oldest_keys:
+        _RATE_LIMIT_BUCKETS.pop(key, None)
+
+
+def _rate_limit_allowed(key: str, limit_per_minute: int, *, now: Optional[float] = None) -> bool:
+    if limit_per_minute <= 0:
+        return True
+    current_time = time.monotonic() if now is None else now
+    cutoff = current_time - RATE_LIMIT_WINDOW_SECONDS
+    with _RATE_LIMIT_LOCK:
+        _sweep_rate_limit_buckets(current_time)
+        bucket = _RATE_LIMIT_BUCKETS.setdefault(key, _RateLimitBucket())
+        bucket.last_access = current_time
+        if bucket.timestamps:
+            bucket.timestamps[:] = [entry for entry in bucket.timestamps if entry > cutoff]
+        if len(bucket.timestamps) >= limit_per_minute:
+            return False
+        bucket.timestamps.append(current_time)
+        _sweep_rate_limit_buckets(current_time, protected_key=key)
+        return True
+
+
+def _enforce_rate_limit(key: str, limit_per_minute: int) -> None:
+    if not _rate_limit_allowed(key, limit_per_minute):
+        raise HTTPException(status_code=429, detail="Rate limit exceeded")
+
+
+def _enforce_auth_rate_limit(request: Request, action: str, identity: Optional[str] = None) -> None:
+    host = _client_host(request)
+    _enforce_rate_limit(f"auth:{action}:ip:{host}", AUTH_RATE_LIMIT_PER_MINUTE)
+    if identity:
+        _enforce_rate_limit(
+            f"auth:{action}:identity:{identity.strip().lower()}",
+            AUTH_RATE_LIMIT_PER_MINUTE,
+        )
+
+
+def _enforce_join_code_rate_limit(request: Request, user_id: Optional[int] = None) -> None:
+    host = _client_host(request)
+    _enforce_rate_limit(f"join-code:ip:{host}", JOIN_CODE_RATE_LIMIT_PER_MINUTE)
+    if user_id is not None:
+        _enforce_rate_limit(f"join-code:user:{user_id}", JOIN_CODE_RATE_LIMIT_PER_MINUTE)
+
+
+def _socket_remote_addr(environ) -> str:
+    headers = {
+        "x-forwarded-for": environ.get("HTTP_X_FORWARDED_FOR"),
+        "x-real-ip": environ.get("HTTP_X_REAL_IP"),
+    }
+    return _resolve_client_host(headers, environ.get("REMOTE_ADDR"))
+
+
+def _socket_join_code_rate_limit_allowed(environ, user_id: int) -> bool:
+    remote_addr = _socket_remote_addr(environ)
+    return (
+        _rate_limit_allowed(f"join-code:socket-ip:{remote_addr}", JOIN_CODE_RATE_LIMIT_PER_MINUTE)
+        and _rate_limit_allowed(f"join-code:user:{user_id}", JOIN_CODE_RATE_LIMIT_PER_MINUTE)
+    )
 
 
 def _run_db_startup_step(step_name: str, operation) -> None:
@@ -334,8 +527,30 @@ class _BlockSyncState:
     persist_task: Optional[asyncio.Task] = None
 
 
+@dataclass
+class _RemoteHubAccessRequest:
+    user_id: int
+    user_name: str
+    sid: str
+
+
+@dataclass
+class _RemoteHubSession:
+    project_id: int
+    host_sid: str
+    host_user_id: int
+    host_user_name: str
+    device_name: str = ""
+    transport: str = ""
+    transport_label: str = ""
+    hub_running: bool = False
+    guests: Dict[int, str] = field(default_factory=dict)
+    pending: Dict[int, _RemoteHubAccessRequest] = field(default_factory=dict)
+
+
 _block_states: Dict[int, _BlockSyncState] = {}
 _block_locks: Dict[int, asyncio.Lock] = {}
+_remote_hub_sessions: Dict[int, _RemoteHubSession] = {}
 
 
 def _apply_changeset(text: str, changeset: Any) -> Optional[str]:
@@ -595,6 +810,7 @@ def _serialize_user(db: Session, viewer_id: Optional[int], user: models.User) ->
         username=user.username,
         display_name=user.display_name,
         is_admin=user.is_admin,
+        is_banned=user.is_banned,
         bio=user.bio,
         description=user.description,
         links=links,
@@ -627,6 +843,7 @@ def _serialize_users(db: Session, viewer_id: Optional[int], users: List[models.U
                 username=user.username,
                 display_name=user.display_name,
                 is_admin=user.is_admin,
+                is_banned=user.is_banned,
                 bio=user.bio,
                 description=user.description,
                 links=links,
@@ -678,6 +895,87 @@ def _emit_message_event(event: str, data: dict, room: Optional[str] = None):
             namespace=MESSAGING_NAMESPACE,
         )
     )
+
+
+def _set_user_banned_state(db: Session, user: models.User, *, is_banned: bool) -> models.User:
+    if is_banned and user.is_admin:
+        raise HTTPException(status_code=400, detail="Admins cannot be banned")
+    if user.is_banned == is_banned:
+        return user
+
+    user.is_banned = is_banned
+    if is_banned:
+        db.query(models.Project).filter(models.Project.owner_id == user.id).update(
+            {
+                models.Project.is_public: False,
+                models.Project.share_pin: None,
+            },
+            synchronize_session=False,
+        )
+        db.query(models.Presence).filter(models.Presence.user_id == user.id).delete(
+            synchronize_session=False
+        )
+    db.flush()
+    return user
+
+
+def _mark_project_sessions_banned(user_id: int) -> List[str]:
+    banned_sids: List[str] = []
+    for sid, session in _sid_info.items():
+        if session.get("user_id") != user_id:
+            continue
+        session["can_edit"] = False
+        session["is_banned"] = True
+        banned_sids.append(sid)
+    return banned_sids
+
+
+async def _disconnect_user_socket_sessions(user_id: int) -> None:
+    project_sids = _mark_project_sessions_banned(user_id)
+    message_sids = [sid for sid, sid_user_id in message_sid_info.items() if sid_user_id == user_id]
+
+    for sid in project_sids:
+        try:
+            await sio.disconnect(sid)
+        except Exception:
+            logger.warning("Failed to disconnect project socket sid=%s for banned user_id=%s", sid, user_id)
+
+    for sid in message_sids:
+        try:
+            await sio.disconnect(sid, namespace=MESSAGING_NAMESPACE)
+        except Exception:
+            logger.warning("Failed to disconnect message socket sid=%s for banned user_id=%s", sid, user_id)
+
+
+def _query_visible_user(db: Session, user_id: int) -> Optional[models.User]:
+    return (
+        db.query(models.User)
+        .filter(models.User.id == user_id, models.User.is_banned == False)
+        .first()
+    )
+
+
+def _require_visible_user(db: Session, user_id: int) -> models.User:
+    user = _query_visible_user(db, user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return user
+
+
+def _project_owner_is_banned(db: Session, project: models.Project) -> bool:
+    owner = db.query(models.User).filter(models.User.id == project.owner_id).first()
+    return bool(owner and owner.is_banned)
+
+
+def _get_project_socket_session(sid: str, project_id: int, *, require_edit: bool = False) -> Optional[Dict[str, Any]]:
+    session = _sid_info.get(sid)
+    if not session or session.get("project_id") != project_id:
+        return None
+    if session.get("is_banned"):
+        return None
+    if require_edit and not session.get("can_edit"):
+        return None
+    return session
 
 FRONTEND_DIST = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "client", "dist"))
 INDEX_FILE = os.path.join(FRONTEND_DIST, "index.html")
@@ -782,6 +1080,336 @@ def _project_block_document_payload(document: models.ProjectBlockDocument, *, re
     return payload
 
 
+def _normalize_tree_path(raw_path: Optional[str], *, allow_empty: bool = False, label: str = "Project path") -> str:
+    raw = str(raw_path or "").replace("\\", "/").strip().strip("/")
+    if not raw:
+        if allow_empty:
+            return ""
+        raise HTTPException(status_code=400, detail=f"{label} cannot be empty")
+
+    parts: List[str] = []
+    for part in raw.split("/"):
+        part = part.strip()
+        if not part or part in {".", ".."}:
+            raise HTTPException(status_code=400, detail=f"Invalid {label.lower()}")
+        parts.append(part)
+
+    normalized = "/".join(parts)
+    if len(normalized) > PROJECT_TREE_PATH_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=f"{label} is too long")
+    return normalized
+
+
+def _normalize_tree_segment(raw_name: Optional[str], *, label: str) -> str:
+    value = str(raw_name or "").replace("\\", "/").strip().strip("/")
+    if not value:
+        raise HTTPException(status_code=400, detail=f"{label} cannot be empty")
+    if "/" in value or value in {".", ".."}:
+        raise HTTPException(status_code=400, detail=f"{label} cannot contain folders")
+    if len(value) > PROJECT_TREE_PATH_MAX_LENGTH:
+        raise HTTPException(status_code=400, detail=f"{label} is too long")
+    return value
+
+
+def _tree_parent_path(path: str) -> str:
+    normalized = _normalize_tree_path(path, label="Project path")
+    if "/" not in normalized:
+        return ""
+    return normalized.rsplit("/", 1)[0]
+
+
+def _tree_base_name(path: str) -> str:
+    normalized = _normalize_tree_path(path, label="Project path")
+    return normalized.rsplit("/", 1)[-1]
+
+
+def _join_tree_path(parent_path: Optional[str], name: str) -> str:
+    parent = _normalize_tree_path(parent_path, allow_empty=True, label="Parent folder")
+    segment = _normalize_tree_segment(name, label="Name")
+    return f"{parent}/{segment}" if parent else segment
+
+
+def _tree_ancestor_paths(path: str) -> List[str]:
+    normalized = _normalize_tree_path(path, label="Project path")
+    parts = normalized.split("/")
+    ancestors: List[str] = []
+    for index in range(1, len(parts)):
+        ancestors.append("/".join(parts[:index]))
+    return ancestors
+
+
+def _occupied_tree_paths(
+    db: Session,
+    project_id: int,
+    *,
+    ignore_file_ids: Optional[set[int]] = None,
+    ignore_folder_ids: Optional[set[int]] = None,
+) -> Dict[str, str]:
+    ignore_file_ids = ignore_file_ids or set()
+    ignore_folder_ids = ignore_folder_ids or set()
+    occupied: Dict[str, str] = {}
+
+    for folder in db.query(models.ProjectFolder).filter(models.ProjectFolder.project_id == project_id).all():
+        if folder.id in ignore_folder_ids:
+            continue
+        folder_path = _normalize_tree_path(folder.path, label="Folder path")
+        occupied.setdefault(folder_path.lower(), folder_path)
+        for ancestor in _tree_ancestor_paths(folder_path):
+            occupied.setdefault(ancestor.lower(), ancestor)
+
+    for project_file in db.query(models.ProjectFile).filter(models.ProjectFile.project_id == project_id).all():
+        if project_file.id in ignore_file_ids:
+            continue
+        file_path = _normalize_tree_path(project_file.name, label="File path")
+        occupied.setdefault(file_path.lower(), file_path)
+        for ancestor in _tree_ancestor_paths(file_path):
+            occupied.setdefault(ancestor.lower(), ancestor)
+
+    return occupied
+
+
+def _folder_path_exists(db: Session, project_id: int, folder_path: str) -> bool:
+    path = _normalize_tree_path(folder_path, allow_empty=True, label="Folder path")
+    if not path:
+        return True
+    normalized_key = path.lower()
+    file_paths = {
+        _normalize_tree_path(project_file.name, label="File path").lower()
+        for project_file in db.query(models.ProjectFile)
+        .filter(models.ProjectFile.project_id == project_id)
+        .all()
+    }
+    if normalized_key in file_paths:
+        return False
+    return normalized_key in _occupied_tree_paths(db, project_id)
+
+
+def _canonical_folder_path(db: Session, project_id: int, folder_path: str) -> str:
+    path = _normalize_tree_path(folder_path, allow_empty=True, label="Folder path")
+    if not path:
+        return ""
+    occupied = _occupied_tree_paths(db, project_id)
+    return occupied.get(path.lower(), path)
+
+
+def _ensure_parent_folder_exists(db: Session, project_id: int, parent_path: str) -> None:
+    if not _folder_path_exists(db, project_id, parent_path):
+        raise HTTPException(status_code=404, detail="Parent folder not found")
+
+
+def _assert_tree_path_available(
+    db: Session,
+    project_id: int,
+    path: str,
+    *,
+    ignore_file_id: Optional[int] = None,
+    ignore_folder_id: Optional[int] = None,
+) -> None:
+    normalized = _normalize_tree_path(path, label="Project path")
+    normalized_key = normalized.lower()
+    occupied = _occupied_tree_paths(
+        db,
+        project_id,
+        ignore_file_ids={ignore_file_id} if ignore_file_id is not None else None,
+        ignore_folder_ids={ignore_folder_id} if ignore_folder_id is not None else None,
+    )
+    if normalized_key in occupied:
+        raise HTTPException(status_code=409, detail="A file or folder already exists at that path")
+
+
+def _assert_folder_move_has_no_conflicts(
+    db: Session,
+    project_id: int,
+    folder: models.ProjectFolder,
+    new_path: str,
+) -> None:
+    old_path = folder.path
+    if old_path == new_path:
+        return
+
+    old_prefix = f"{old_path}/"
+    descendant_folders = (
+        db.query(models.ProjectFolder)
+        .filter(models.ProjectFolder.project_id == project_id, models.ProjectFolder.path.like(f"{old_prefix}%"))
+        .all()
+    )
+    descendant_files = (
+        db.query(models.ProjectFile)
+        .filter(models.ProjectFile.project_id == project_id, models.ProjectFile.name.like(f"{old_prefix}%"))
+        .all()
+    )
+
+    moving_folder_ids = {folder.id, *[entry.id for entry in descendant_folders]}
+    moving_file_ids = {entry.id for entry in descendant_files}
+    next_folder_paths = {new_path}
+    next_file_paths: set[str] = set()
+
+    for descendant in descendant_folders:
+        next_folder_paths.add(f"{new_path}{descendant.path[len(old_path):]}")
+    for project_file in descendant_files:
+        next_file_paths.add(f"{new_path}{project_file.name[len(old_path):]}")
+
+    occupied_paths = set(
+        _occupied_tree_paths(
+            db,
+            project_id,
+            ignore_file_ids=moving_file_ids,
+            ignore_folder_ids=moving_folder_ids,
+        ).keys()
+    )
+    next_folder_paths = {entry.lower() for entry in next_folder_paths}
+    next_file_paths = {entry.lower() for entry in next_file_paths}
+    if next_folder_paths & occupied_paths:
+        raise HTTPException(status_code=409, detail="A file or folder already exists at that path")
+    if next_file_paths & occupied_paths:
+        raise HTTPException(status_code=409, detail="A file or folder already exists at that path")
+
+
+def _move_folder_subtree(
+    db: Session,
+    project_id: int,
+    folder: models.ProjectFolder,
+    new_path: str,
+) -> None:
+    old_path = folder.path
+    if old_path == new_path:
+        return
+
+    old_prefix = f"{old_path}/"
+    descendant_folders = (
+        db.query(models.ProjectFolder)
+        .filter(models.ProjectFolder.project_id == project_id, models.ProjectFolder.path.like(f"{old_prefix}%"))
+        .all()
+    )
+    descendant_files = (
+        db.query(models.ProjectFile)
+        .filter(models.ProjectFile.project_id == project_id, models.ProjectFile.name.like(f"{old_prefix}%"))
+        .all()
+    )
+
+    _assert_folder_move_has_no_conflicts(db, project_id, folder, new_path)
+    folder.path = new_path
+    for descendant in descendant_folders:
+        descendant.path = f"{new_path}{descendant.path[len(old_path):]}"
+    for project_file in descendant_files:
+        project_file.name = f"{new_path}{project_file.name[len(old_path):]}"
+
+
+def _apply_tree_order(
+    db: Session,
+    project_id: int,
+    parent_path: str,
+    ordered_siblings: List[schemas.ProjectTreeOrderItem],
+) -> None:
+    parent = _normalize_tree_path(parent_path, allow_empty=True, label="Target folder")
+    files_by_id = {entry.id: entry for entry in db.query(models.ProjectFile).filter(models.ProjectFile.project_id == project_id).all()}
+    folders_by_id = {entry.id: entry for entry in db.query(models.ProjectFolder).filter(models.ProjectFolder.project_id == project_id).all()}
+
+    for index, item in enumerate(ordered_siblings):
+        sort_order = (index + 1) * TREE_SORT_STEP
+        if item.kind == "file":
+            project_file = files_by_id.get(item.id)
+            if project_file and _tree_parent_path(project_file.name) == parent:
+                project_file.sort_order = sort_order
+            continue
+        folder = folders_by_id.get(item.id)
+        if folder and _tree_parent_path(folder.path) == parent:
+            folder.sort_order = sort_order
+
+
+def _next_tree_sort_order(db: Session, project_id: int, parent_path: str) -> int:
+    parent = _normalize_tree_path(parent_path, allow_empty=True, label="Parent folder")
+    max_order = 0
+    files = db.query(models.ProjectFile).filter(models.ProjectFile.project_id == project_id).all()
+    folders = db.query(models.ProjectFolder).filter(models.ProjectFolder.project_id == project_id).all()
+    for project_file in files:
+        if _tree_parent_path(project_file.name) == parent:
+            max_order = max(max_order, int(project_file.sort_order or 0))
+    for folder in folders:
+        if _tree_parent_path(folder.path) == parent:
+            max_order = max(max_order, int(folder.sort_order or 0))
+    return max_order + TREE_SORT_STEP
+
+
+def _ordered_project_files(db: Session, project_id: int) -> List[models.ProjectFile]:
+    return (
+        db.query(models.ProjectFile)
+        .filter(models.ProjectFile.project_id == project_id)
+        .order_by(models.ProjectFile.sort_order.asc(), models.ProjectFile.created_at.asc(), models.ProjectFile.id.asc())
+        .all()
+    )
+
+
+def _ordered_project_folders(db: Session, project_id: int) -> List[models.ProjectFolder]:
+    return (
+        db.query(models.ProjectFolder)
+        .filter(models.ProjectFolder.project_id == project_id)
+        .order_by(models.ProjectFolder.sort_order.asc(), models.ProjectFolder.path.asc(), models.ProjectFolder.id.asc())
+        .all()
+    )
+
+
+def _project_file_payload(project_file: models.ProjectFile, *, include_rev: bool = False) -> Dict[str, Any]:
+    state = _file_states.get(project_file.id)
+    has_live_state = state is not None and state.project_id == project_file.project_id
+    payload = {
+        "id": project_file.id,
+        "name": project_file.name,
+        "content": state.content if has_live_state else (project_file.content or ""),
+        "sort_order": int(project_file.sort_order or 0),
+    }
+    if include_rev:
+        payload["rev"] = state.rev if has_live_state else 0
+    return payload
+
+
+def _project_folder_payload(folder: models.ProjectFolder) -> Dict[str, Any]:
+    return {
+        "id": folder.id,
+        "path": folder.path,
+        "sort_order": int(folder.sort_order or 0),
+    }
+
+
+def _project_tree_payload(db: Session, project_id: int, *, include_revs: bool = False) -> Dict[str, Any]:
+    project = db.query(models.Project).filter(models.Project.id == project_id).first()
+    if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+
+    payload_files = [_project_file_payload(project_file, include_rev=include_revs) for project_file in _ordered_project_files(db, project_id)]
+    payload_folders = [_project_folder_payload(folder) for folder in _ordered_project_folders(db, project_id)]
+    payload_block_documents: List[Dict[str, Any]] = []
+    if _project_supports_blocks(project):
+        block_documents = (
+            db.query(models.ProjectBlockDocument)
+            .filter(models.ProjectBlockDocument.project_id == project_id)
+            .order_by(models.ProjectBlockDocument.created_at.asc(), models.ProjectBlockDocument.id.asc())
+            .all()
+        )
+        for block_document in block_documents:
+            state = _block_states.get(block_document.id)
+            payload_block_documents.append(
+                _project_block_document_payload(
+                    block_document,
+                    rev=state.rev if include_revs and state and state.project_id == project_id else None,
+                )
+            )
+    return {
+        "files": payload_files,
+        "folders": payload_folders,
+        "blockDocuments": payload_block_documents,
+    }
+
+
+async def _broadcast_project_tree(db: Session, project_id: int) -> None:
+    payload = _project_tree_payload(db, project_id, include_revs=True)
+    await sio.emit(
+        "project_tree_updated",
+        {"projectId": project_id, **payload},
+        room=f"project_{project_id}",
+    )
+
+
 def _derive_block_entry_module(name: Optional[str], fallback: str = "main.py") -> str:
     raw_name = (name or "").strip().lower()
     stem = re.sub(r"[^a-z0-9._-]+", "_", raw_name).strip("._-")
@@ -812,6 +1440,7 @@ def _generate_project_public_id() -> str:
 
 def _project_payload(db: Session, project: models.Project) -> Dict[str, Any]:
     owner = db.query(models.User).filter(models.User.id == project.owner_id).first()
+    tree_payload = _project_tree_payload(db, project.id)
     return {
         "id": project.id,
         "public_id": project.public_id or "",
@@ -823,10 +1452,59 @@ def _project_payload(db: Session, project: models.Project) -> Dict[str, Any]:
         "owner_id": project.owner_id,
         "owner_name": owner.display_name if owner else "Unknown",
         "is_public": project.is_public,
-        "files": project.files,
-        "block_documents": project.block_documents if _project_supports_blocks(project) else [],
+        "files": tree_payload["files"],
+        "folders": tree_payload["folders"],
+        "block_documents": tree_payload["blockDocuments"],
         "collaborators": project.collaborators,
     }
+
+
+def _project_permissions(db: Session, project: models.Project, user: Optional[models.User]) -> Dict[str, bool]:
+    owner_is_banned = _project_owner_is_banned(db, project)
+    if user is None:
+        return {
+            "is_owner": False,
+            "is_collaborator": False,
+            "can_view": bool(project.is_public and not owner_is_banned),
+            "can_edit": False,
+            "can_manage": False,
+            "can_share": False,
+            "can_toggle_visibility": False,
+        }
+
+    is_owner = project.owner_id == user.id
+    is_collaborator = (
+        db.query(models.ProjectCollaborator)
+        .filter(
+            models.ProjectCollaborator.project_id == project.id,
+            models.ProjectCollaborator.user_id == user.id,
+        )
+        .first()
+        is not None
+    )
+    can_view = bool(user.is_admin or (not owner_is_banned and (project.is_public or is_owner or is_collaborator)))
+    can_edit = bool(user.is_admin or (not owner_is_banned and (is_owner or is_collaborator)))
+    can_manage = bool(user.is_admin or is_owner)
+    can_share = bool(user.is_admin or (not owner_is_banned and (is_owner or is_collaborator)))
+    return {
+        "is_owner": is_owner,
+        "is_collaborator": is_collaborator,
+        "can_view": can_view,
+        "can_edit": can_edit,
+        "can_manage": can_manage,
+        "can_share": can_share,
+        "can_toggle_visibility": can_manage,
+    }
+
+
+def _project_payload_for_user(
+    db: Session,
+    project: models.Project,
+    user: Optional[models.User],
+) -> Dict[str, Any]:
+    payload = _project_payload(db, project)
+    payload["permissions"] = _project_permissions(db, project, user)
+    return payload
 
 
 def _ensure_pybricks_project(project: models.Project) -> None:
@@ -1075,6 +1753,34 @@ def startup_db_client():
                 trans.rollback()
                 print(f"Migration warning (uq_users_google_sub): {e}")
 
+            col_is_banned_exists = False
+            trans = conn.begin()
+            try:
+                conn.execute(text("SELECT is_banned FROM users LIMIT 1"))
+                trans.commit()
+                col_is_banned_exists = True
+            except Exception:
+                trans.rollback()
+                col_is_banned_exists = False
+
+            if not col_is_banned_exists:
+                trans = conn.begin()
+                try:
+                    conn.execute(text("ALTER TABLE users ADD COLUMN is_banned BOOLEAN DEFAULT FALSE"))
+                    trans.commit()
+                    print("Migration successful: Added is_banned column.")
+                except Exception as e:
+                    trans.rollback()
+                    print(f"Migration warning (is_banned): {e}")
+
+            trans = conn.begin()
+            try:
+                conn.execute(text("UPDATE users SET is_banned = FALSE WHERE is_banned IS NULL"))
+                trans.commit()
+            except Exception as e:
+                trans.rollback()
+                print(f"Migration warning (is_banned_backfill): {e}")
+
             # Check is_public on projects
             col_public_exists = False
             trans = conn.begin()
@@ -1235,6 +1941,60 @@ def startup_db_client():
                 trans.rollback()
                 print(f"Migration warning (project_block_documents): {e}")
 
+            # Check sort_order on project_files
+            col_project_file_sort_order_exists = False
+            trans = conn.begin()
+            try:
+                conn.execute(text("SELECT sort_order FROM project_files LIMIT 1"))
+                trans.commit()
+                col_project_file_sort_order_exists = True
+            except Exception:
+                trans.rollback()
+                col_project_file_sort_order_exists = False
+
+            if not col_project_file_sort_order_exists:
+                trans = conn.begin()
+                try:
+                    conn.execute(text("ALTER TABLE project_files ADD COLUMN sort_order INTEGER DEFAULT 0 NOT NULL"))
+                    conn.execute(text("UPDATE project_files SET sort_order = id * 1000 WHERE sort_order = 0 OR sort_order IS NULL"))
+                    trans.commit()
+                    print("Migration successful: Added sort_order column to project_files.")
+                except Exception as e:
+                    trans.rollback()
+                    print(f"Migration warning (project_files.sort_order): {e}")
+
+            trans = conn.begin()
+            try:
+                conn.execute(
+                    text(
+                        "CREATE TABLE IF NOT EXISTS project_folders ("
+                        "id INTEGER PRIMARY KEY, "
+                        "project_id INTEGER NOT NULL, "
+                        "path VARCHAR NOT NULL, "
+                        "sort_order INTEGER NOT NULL DEFAULT 0, "
+                        "created_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                        "updated_at DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP, "
+                        "FOREIGN KEY(project_id) REFERENCES projects(id)"
+                        ")"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE UNIQUE INDEX IF NOT EXISTS uq_project_folder_path "
+                        "ON project_folders (project_id, path)"
+                    )
+                )
+                conn.execute(
+                    text(
+                        "CREATE INDEX IF NOT EXISTS ix_project_folders_project_path "
+                        "ON project_folders (project_id, path)"
+                    )
+                )
+                trans.commit()
+            except Exception as e:
+                trans.rollback()
+                print(f"Migration warning (project_folders): {e}")
+
             # Check public_id on projects
             col_public_id_exists = False
             trans = conn.begin()
@@ -1374,7 +2134,7 @@ def startup_db_client():
                 _tables_with_serial_pk = [
                     "users", "projects", "project_files", "project_collaborators",
                     "project_share_tokens", "project_tasks", "project_snapshots",
-                    "project_snapshot_files", "project_block_documents",
+                    "project_snapshot_files", "project_block_documents", "project_folders",
                 ]
                 trans = conn.begin()
                 try:
@@ -1461,7 +2221,6 @@ async def spa_fallback(request: Request, call_next):
     that deep links like /projects/:id return index.html instead of hitting API routes.
     """
     spa_passthrough_prefixes = (
-        "/docs",
         "/redoc",
         "/openapi",
         "/static",
@@ -1503,6 +2262,8 @@ def _get_project_by_ref(db: Session, project_ref: int | str) -> Optional[models.
 def _ensure_project_access(db: Session, project_ref: int | str, user: models.User, require_write: bool = False) -> models.Project:
     project = _get_project_by_ref(db, project_ref)
     if project is None:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if _project_owner_is_banned(db, project) and not user.is_admin:
         raise HTTPException(status_code=404, detail="Project not found")
 
     project_id = project.id
@@ -1631,10 +2392,11 @@ def admin_list_users(current_user: models.User = Depends(check_admin), db: Sessi
 
 @app.patch("/admin/api/users/{user_id}", response_model=schemas.AdminUserOut)
 @app.patch("/admin/users/{user_id}", response_model=schemas.AdminUserOut)
-def admin_update_user(user_id: int, user_in: schemas.AdminUserUpdate, current_user: models.User = Depends(check_admin), db: Session = Depends(get_db)):
+async def admin_update_user(user_id: int, user_in: schemas.AdminUserUpdate, current_user: models.User = Depends(check_admin), db: Session = Depends(get_db)):
     user = db.query(models.User).filter(models.User.id == user_id).first()
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
+    should_disconnect = False
     if user_in.username is not None:
         user.username = user_in.username
     if user_in.display_name is not None:
@@ -1642,6 +2404,36 @@ def admin_update_user(user_id: int, user_in: schemas.AdminUserUpdate, current_us
     if user_in.password is not None:
         user.password_hash = auth.get_password_hash(user_in.password)
         # user.password_plain = user_in.password
+    if user_in.is_banned is not None:
+        _set_user_banned_state(db, user, is_banned=user_in.is_banned)
+        should_disconnect = user_in.is_banned
+    db.commit()
+    db.refresh(user)
+    if should_disconnect:
+        await _disconnect_user_socket_sessions(user.id)
+    return user
+
+@app.post("/admin/api/users/{user_id}/ban", response_model=schemas.AdminUserOut)
+@app.post("/admin/users/{user_id}/ban", response_model=schemas.AdminUserOut)
+async def admin_ban_user(user_id: int, current_user: models.User = Depends(check_admin), db: Session = Depends(get_db)):
+    if user_id == current_user.id:
+        raise HTTPException(status_code=400, detail="Cannot ban your own account")
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    _set_user_banned_state(db, user, is_banned=True)
+    db.commit()
+    db.refresh(user)
+    await _disconnect_user_socket_sessions(user.id)
+    return user
+
+@app.post("/admin/api/users/{user_id}/unban", response_model=schemas.AdminUserOut)
+@app.post("/admin/users/{user_id}/unban", response_model=schemas.AdminUserOut)
+async def admin_unban_user(user_id: int, current_user: models.User = Depends(check_admin), db: Session = Depends(get_db)):
+    user = db.query(models.User).filter(models.User.id == user_id).first()
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    _set_user_banned_state(db, user, is_banned=False)
     db.commit()
     db.refresh(user)
     return user
@@ -1663,7 +2455,7 @@ def admin_delete_user(user_id: int, current_user: models.User = Depends(check_ad
 @app.get("/admin/api/projects", response_model=List[schemas.ProjectOut])
 @app.get("/admin/projects", response_model=List[schemas.ProjectOut])
 def admin_list_projects(current_user: models.User = Depends(check_admin), db: Session = Depends(get_db)):
-    return _enrich_projects_with_owner(db, db.query(models.Project).all())
+    return _enrich_projects_with_owner(db, db.query(models.Project).all(), current_user)
 
 @app.get("/admin/api/projects/{project_id}", response_model=schemas.ProjectOut)
 @app.get("/admin/projects/{project_id}", response_model=schemas.ProjectOut)
@@ -1671,7 +2463,7 @@ def admin_get_project(project_id: int, current_user: models.User = Depends(check
     project = db.query(models.Project).filter(models.Project.id == project_id).first()
     if not project:
         raise HTTPException(status_code=404, detail="Project not found")
-    return _project_payload(db, project)
+    return _project_payload_for_user(db, project, current_user)
 
 @app.delete("/admin/api/projects/{project_id}")
 @app.delete("/admin/projects/{project_id}")
@@ -1705,6 +2497,8 @@ def admin_impersonate(user_id: int, current_user: models.User = Depends(check_ad
     target = db.query(models.User).filter(models.User.id == user_id).first()
     if not target:
         raise HTTPException(status_code=404, detail="User not found")
+    if target.is_banned:
+        raise HTTPException(status_code=400, detail="Cannot impersonate a banned user")
     
     # Create token with impersonator claim
     token = auth.create_access_token({"sub": target.id, "impersonator_id": current_user.id})
@@ -1715,7 +2509,8 @@ def admin_impersonate(user_id: int, current_user: models.User = Depends(check_ad
 
 
 @app.post("/auth/register", response_model=schemas.TokenResponse)
-def register(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
+def register(request: Request, user_in: schemas.UserCreate, db: Session = Depends(get_db)):
+    _enforce_auth_rate_limit(request, "register")
     import re
     username = _normalize_username(user_in.username)
     # Validate username format: only a-z and 0-9
@@ -1738,8 +2533,13 @@ def register(user_in: schemas.UserCreate, db: Session = Depends(get_db)):
 
 
 @app.post("/auth/login", response_model=schemas.TokenResponse)
-def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depends(get_db)):
+def login(
+    request: Request,
+    form_data: OAuth2PasswordRequestForm = Depends(),
+    db: Session = Depends(get_db),
+):
     username = _normalize_username(form_data.username)
+    _enforce_auth_rate_limit(request, "login", username)
     user = (
         db.query(models.User)
         .filter(func.lower(models.User.username) == username)
@@ -1752,7 +2552,12 @@ def login(form_data: OAuth2PasswordRequestForm = Depends(), db: Session = Depend
 
 
 @app.post("/auth/google/start", response_model=schemas.GoogleAuthStartResponse)
-def google_auth_start(body: schemas.GoogleAuthStartRequest, db: Session = Depends(get_db)):
+def google_auth_start(
+    request: Request,
+    body: schemas.GoogleAuthStartRequest,
+    db: Session = Depends(get_db),
+):
+    _enforce_auth_rate_limit(request, "google-start")
     claims = _verify_google_claims(body.id_token)
     email = claims["email"]
     google_sub = claims["google_sub"]
@@ -1808,7 +2613,12 @@ def google_auth_start(body: schemas.GoogleAuthStartRequest, db: Session = Depend
 
 
 @app.post("/auth/google/complete-signup", response_model=schemas.TokenResponse)
-def google_complete_signup(body: schemas.GoogleSignupCompleteRequest, db: Session = Depends(get_db)):
+def google_complete_signup(
+    request: Request,
+    body: schemas.GoogleSignupCompleteRequest,
+    db: Session = Depends(get_db),
+):
+    _enforce_auth_rate_limit(request, "google-complete")
     try:
         payload = auth.decode_google_signup_token(body.signup_token)
     except Exception:
@@ -1939,6 +2749,7 @@ def passkey_register_complete(
 
 @app.post("/auth/passkey/login/options")
 def passkey_login_options(request: Request):
+    _enforce_auth_rate_limit(request, "passkey-options")
     # For discoverable credentials (passkeys), we don't need allow_credentials
     options = passkey_module.create_authentication_options(
         credential_ids=[],
@@ -1950,6 +2761,7 @@ def passkey_login_options(request: Request):
 
 @app.post("/auth/passkey/login/complete", response_model=schemas.TokenResponse)
 def passkey_login_complete(request: Request, request_body: dict, db: Session = Depends(get_db)):
+    _enforce_auth_rate_limit(request, "passkey-complete")
     from webauthn.helpers import base64url_to_bytes
 
     raw_id = request_body.get("rawId") or request_body.get("id", "")
@@ -2046,6 +2858,7 @@ def _to_user_me_out(user: models.User) -> schemas.UserMeOut:
         username=user.username,
         display_name=user.display_name,
         is_admin=user.is_admin,
+        is_banned=user.is_banned,
         bio=user.bio,
         description=user.description,
         links=links,
@@ -2063,14 +2876,26 @@ def get_me(current_user: models.User = Depends(get_current_user)):
 
 @app.get("/projects", response_model=List[schemas.ProjectOut])
 def list_projects(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    owned = db.query(models.Project).filter(models.Project.owner_id == current_user.id)
-    collab_ids = [
-        pc.project_id
-        for pc in db.query(models.ProjectCollaborator).filter(models.ProjectCollaborator.user_id == current_user.id)
-    ]
-    shared = db.query(models.Project).filter(models.Project.id.in_(collab_ids))
-    projects = owned.union(shared).all()
-    return _enrich_projects_with_owner(db, projects)
+    projects = (
+        db.query(models.Project)
+        .join(models.User, models.User.id == models.Project.owner_id)
+        .outerjoin(
+            models.ProjectCollaborator,
+            and_(
+                models.ProjectCollaborator.project_id == models.Project.id,
+                models.ProjectCollaborator.user_id == current_user.id,
+            ),
+        )
+        .filter(models.User.is_banned == False)
+        .filter(
+            or_(
+                models.Project.owner_id == current_user.id,
+                models.ProjectCollaborator.user_id == current_user.id,
+            )
+        )
+        .all()
+    )
+    return _enrich_projects_with_owner(db, projects, current_user)
 
 
 @app.post("/projects", response_model=schemas.ProjectOut)
@@ -2092,53 +2917,69 @@ def create_project(project_in: schemas.ProjectCreate, current_user: models.User 
         project_id=project.id,
         name="main.py",
         content=_project_starter_content(project.project_type),
+        sort_order=TREE_SORT_STEP,
     )
     db.add(default_file)
     db.commit()
     db.refresh(project)
-    return _project_payload(db, project)
+    return _project_payload_for_user(db, project, current_user)
 
 
 # --- IMPORTANT: These routes MUST be defined BEFORE /projects/{project_id} ---
 
 # Helper to add owner_name to project
-def _enrich_projects_with_owner(db: Session, projects):
-    return [_project_payload(db, project) for project in projects]
+def _enrich_projects_with_owner(
+    db: Session,
+    projects,
+    current_user: Optional[models.User] = None,
+):
+    return [_project_payload_for_user(db, project, current_user) for project in projects]
 
 @app.get("/projects/explore/all")
-def explore_projects(db: Session = Depends(get_db)):
+def explore_projects(
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_optional_user),
+):
     projects = (
         db.query(models.Project)
+        .join(models.User, models.User.id == models.Project.owner_id)
         .filter(models.Project.is_public == True)
+        .filter(models.User.is_banned == False)
         .order_by(models.Project.updated_at.desc())
         .limit(50)
         .all()
     )
-    return _enrich_projects_with_owner(db, projects)
+    return _enrich_projects_with_owner(db, projects, current_user)
 
 @app.get("/projects/search")
-def search_projects(q: str = "", db: Session = Depends(get_db)):
+def search_projects(
+    q: str = "",
+    db: Session = Depends(get_db),
+    current_user: Optional[models.User] = Depends(get_optional_user),
+):
     if not q:
         return []
     pattern = f"%{q}%"
     projects = (
         db.query(models.Project)
+        .join(models.User, models.User.id == models.Project.owner_id)
         .filter(
             models.Project.is_public == True,
+            models.User.is_banned == False,
             (models.Project.name.ilike(pattern) | models.Project.description.ilike(pattern))
         )
         .order_by(models.Project.updated_at.desc())
         .limit(50)
         .all()
     )
-    return _enrich_projects_with_owner(db, projects)
+    return _enrich_projects_with_owner(db, projects, current_user)
 # --- End of specific routes ---
 
 
 @app.get("/projects/{project_ref}", response_model=schemas.ProjectOut)
 def get_project(project_ref: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     project = _ensure_project_access(db, project_ref, current_user)
-    return _project_payload(db, project)
+    return _project_payload_for_user(db, project, current_user)
 
 
 @app.patch("/projects/{project_id}", response_model=schemas.ProjectOut)
@@ -2149,7 +2990,7 @@ def update_project(project_id: int, project_in: schemas.ProjectCreate, current_u
         project.description = project_in.description
     db.commit()
     db.refresh(project)
-    return _project_payload(db, project)
+    return _project_payload_for_user(db, project, current_user)
 
 
 @app.post("/projects/{project_id}/duplicate", response_model=schemas.ProjectOut)
@@ -2187,6 +3028,21 @@ def duplicate_project(
                 project_id=duplicated_project.id,
                 name=source_file.name,
                 content=source_file.content or "",
+                sort_order=source_file.sort_order or 0,
+            )
+        )
+
+    source_folders = (
+        db.query(models.ProjectFolder)
+        .filter(models.ProjectFolder.project_id == source_project.id)
+        .all()
+    )
+    for source_folder in source_folders:
+        db.add(
+            models.ProjectFolder(
+                project_id=duplicated_project.id,
+                path=source_folder.path,
+                sort_order=source_folder.sort_order or 0,
             )
         )
 
@@ -2214,29 +3070,47 @@ def duplicate_project(
 
     db.commit()
     db.refresh(duplicated_project)
-    return _project_payload(db, duplicated_project)
+    return _project_payload_for_user(db, duplicated_project, current_user)
 
 
 @app.delete("/projects/{project_id}")
 def delete_project(project_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
-    project = _ensure_project_access(db, project_id, current_user, require_write=True)
+    project = _ensure_project_access(db, project_id, current_user)
+    if project.owner_id != current_user.id and not current_user.is_admin:
+        raise HTTPException(status_code=403, detail="Only owner can delete project")
     db.delete(project)
     db.commit()
     return {"status": "deleted"}
 
 
 @app.post("/projects/{project_id}/files", response_model=schemas.ProjectFileOut)
-def add_file(project_id: int, file_in: schemas.FileCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def add_file(project_id: int, file_in: schemas.FileCreate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     _ensure_project_access(db, project_id, current_user, require_write=True)
-    pf = models.ProjectFile(project_id=project_id, name=file_in.name, content=file_in.content or "")
+    parent_path = _normalize_tree_path(file_in.folder_path, allow_empty=True, label="Parent folder")
+    if "folder_path" in file_in.model_fields_set:
+        _ensure_parent_folder_exists(db, project_id, parent_path)
+        parent_path = _canonical_folder_path(db, project_id, parent_path)
+        file_path = _join_tree_path(parent_path, file_in.name)
+    else:
+        file_path = _normalize_tree_path(file_in.name, label="File path")
+        parent_path = _tree_parent_path(file_path)
+        _ensure_parent_folder_exists(db, project_id, parent_path)
+        parent_path = _canonical_folder_path(db, project_id, parent_path)
+        file_path = _join_tree_path(parent_path, _tree_base_name(file_path))
+    _assert_tree_path_available(db, project_id, file_path)
+    sort_order = file_in.sort_order if file_in.sort_order is not None else _next_tree_sort_order(db, project_id, _tree_parent_path(file_path))
+    pf = models.ProjectFile(project_id=project_id, name=file_path, content=file_in.content or "", sort_order=sort_order)
     db.add(pf)
     db.commit()
     db.refresh(pf)
+    _file_states[pf.id] = _FileSyncState(project_id=project_id, content=pf.content or "")
+    _file_locks.setdefault(pf.id, asyncio.Lock())
+    await _broadcast_project_tree(db, project_id)
     return pf
 
 
 @app.post("/projects/{project_id}/block-documents", response_model=schemas.ProjectBlockDocumentOut)
-def add_block_document(
+async def add_block_document(
     project_id: int,
     document_in: schemas.ProjectBlockDocumentCreate,
     current_user: models.User = Depends(get_current_user),
@@ -2257,37 +3131,204 @@ def add_block_document(
         project.entry_block_document_id = document.id
     db.commit()
     db.refresh(document)
+    await _broadcast_project_tree(db, project_id)
     return document
 
 
 @app.patch("/projects/{project_id}/files/{file_id}", response_model=schemas.ProjectFileOut)
-def update_file(project_id: int, file_id: int, file_in: schemas.FileUpdate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def update_file(project_id: int, file_id: int, file_in: schemas.FileUpdate, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     _ensure_project_access(db, project_id, current_user, require_write=True)
     pf = db.query(models.ProjectFile).filter(models.ProjectFile.id == file_id, models.ProjectFile.project_id == project_id).first()
     if not pf:
         raise HTTPException(status_code=404, detail="File not found")
-    if file_in.name is not None:
-        pf.name = file_in.name
+
+    if file_in.name is not None or "folder_path" in file_in.model_fields_set:
+        if "folder_path" in file_in.model_fields_set:
+            parent_path = _normalize_tree_path(file_in.folder_path, allow_empty=True, label="Parent folder")
+            _ensure_parent_folder_exists(db, project_id, parent_path)
+            parent_path = _canonical_folder_path(db, project_id, parent_path)
+            file_name = _normalize_tree_segment(file_in.name, label="File name") if file_in.name is not None else _tree_base_name(pf.name)
+            next_path = _join_tree_path(parent_path, file_name)
+        else:
+            raw_name = file_in.name or ""
+            if "/" in raw_name or "\\" in raw_name:
+                next_path = _normalize_tree_path(raw_name, label="File path")
+                parent_path = _tree_parent_path(next_path)
+                _ensure_parent_folder_exists(db, project_id, parent_path)
+                parent_path = _canonical_folder_path(db, project_id, parent_path)
+                next_path = _join_tree_path(parent_path, _tree_base_name(next_path))
+            else:
+                next_path = _join_tree_path(_tree_parent_path(pf.name), raw_name)
+        _assert_tree_path_available(db, project_id, next_path, ignore_file_id=pf.id)
+        pf.name = next_path
+
+    if file_in.sort_order is not None:
+        pf.sort_order = int(file_in.sort_order)
+
     if file_in.content is not None:
         pf.content = file_in.content
+        state = _file_states.get(file_id)
+        if state and state.project_id == project_id:
+            state.content = file_in.content
+            state.rev += 1
+            state.base_rev = state.rev
+            state.ops = []
     db.commit()
     db.refresh(pf)
+    await _broadcast_project_tree(db, project_id)
     return pf
 
 
 @app.delete("/projects/{project_id}/files/{file_id}")
-def delete_file(project_id: int, file_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+async def delete_file(project_id: int, file_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
     _ensure_project_access(db, project_id, current_user, require_write=True)
     pf = db.query(models.ProjectFile).filter(models.ProjectFile.id == file_id, models.ProjectFile.project_id == project_id).first()
     if not pf:
         raise HTTPException(status_code=404, detail="File not found")
+    state = _file_states.pop(file_id, None)
+    if state and state.persist_task and not state.persist_task.done():
+        state.persist_task.cancel()
+    _file_locks.pop(file_id, None)
     db.delete(pf)
     db.commit()
+    await _broadcast_project_tree(db, project_id)
     return {"status": "deleted"}
 
 
+@app.post("/projects/{project_id}/folders", response_model=schemas.ProjectFolderOut)
+async def add_folder(
+    project_id: int,
+    folder_in: schemas.ProjectFolderCreate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ensure_project_access(db, project_id, current_user, require_write=True)
+    parent_path = _normalize_tree_path(folder_in.parent_path, allow_empty=True, label="Parent folder")
+    _ensure_parent_folder_exists(db, project_id, parent_path)
+    parent_path = _canonical_folder_path(db, project_id, parent_path)
+    folder_path = _join_tree_path(parent_path, folder_in.name)
+    _assert_tree_path_available(db, project_id, folder_path)
+    folder = models.ProjectFolder(
+        project_id=project_id,
+        path=folder_path,
+        sort_order=folder_in.sort_order if folder_in.sort_order is not None else _next_tree_sort_order(db, project_id, parent_path),
+    )
+    db.add(folder)
+    db.commit()
+    db.refresh(folder)
+    await _broadcast_project_tree(db, project_id)
+    return folder
+
+
+@app.patch("/projects/{project_id}/folders/{folder_id}", response_model=schemas.ProjectFolderOut)
+async def update_folder(
+    project_id: int,
+    folder_id: int,
+    folder_in: schemas.ProjectFolderUpdate,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ensure_project_access(db, project_id, current_user, require_write=True)
+    folder = db.query(models.ProjectFolder).filter(models.ProjectFolder.id == folder_id, models.ProjectFolder.project_id == project_id).first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found")
+
+    if folder_in.name is not None or "parent_path" in folder_in.model_fields_set:
+        parent_path = (
+            _normalize_tree_path(folder_in.parent_path, allow_empty=True, label="Parent folder")
+            if "parent_path" in folder_in.model_fields_set
+            else _tree_parent_path(folder.path)
+        )
+        if parent_path == folder.path or parent_path.startswith(f"{folder.path}/"):
+            raise HTTPException(status_code=400, detail="A folder cannot be moved into itself")
+        _ensure_parent_folder_exists(db, project_id, parent_path)
+        parent_path = _canonical_folder_path(db, project_id, parent_path)
+        folder_name = _normalize_tree_segment(folder_in.name, label="Folder name") if folder_in.name is not None else _tree_base_name(folder.path)
+        next_path = _join_tree_path(parent_path, folder_name)
+        _move_folder_subtree(db, project_id, folder, next_path)
+
+    if folder_in.sort_order is not None:
+        folder.sort_order = int(folder_in.sort_order)
+
+    db.commit()
+    db.refresh(folder)
+    await _broadcast_project_tree(db, project_id)
+    return folder
+
+
+@app.delete("/projects/{project_id}/folders/{folder_id}")
+async def delete_folder(
+    project_id: int,
+    folder_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ensure_project_access(db, project_id, current_user, require_write=True)
+    folder = db.query(models.ProjectFolder).filter(models.ProjectFolder.id == folder_id, models.ProjectFolder.project_id == project_id).first()
+    if not folder:
+        raise HTTPException(status_code=404, detail="Folder not found")
+
+    prefix = f"{folder.path}/"
+    nested_folders = (
+        db.query(models.ProjectFolder)
+        .filter(models.ProjectFolder.project_id == project_id, models.ProjectFolder.path.like(f"{prefix}%"))
+        .all()
+    )
+    nested_files = (
+        db.query(models.ProjectFile)
+        .filter(models.ProjectFile.project_id == project_id, models.ProjectFile.name.like(f"{prefix}%"))
+        .all()
+    )
+    for project_file in nested_files:
+        state = _file_states.pop(project_file.id, None)
+        if state and state.persist_task and not state.persist_task.done():
+            state.persist_task.cancel()
+        _file_locks.pop(project_file.id, None)
+        db.delete(project_file)
+    for nested_folder in nested_folders:
+        db.delete(nested_folder)
+    db.delete(folder)
+    db.commit()
+    await _broadcast_project_tree(db, project_id)
+    return {"status": "deleted"}
+
+
+@app.patch("/projects/{project_id}/tree/move")
+async def move_project_tree_item(
+    project_id: int,
+    move_in: schemas.ProjectTreeMoveRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ensure_project_access(db, project_id, current_user, require_write=True)
+    target_parent_path = _normalize_tree_path(move_in.target_parent_path, allow_empty=True, label="Target folder")
+    _ensure_parent_folder_exists(db, project_id, target_parent_path)
+    target_parent_path = _canonical_folder_path(db, project_id, target_parent_path)
+
+    if move_in.kind == "file":
+        project_file = db.query(models.ProjectFile).filter(models.ProjectFile.id == move_in.id, models.ProjectFile.project_id == project_id).first()
+        if not project_file:
+            raise HTTPException(status_code=404, detail="File not found")
+        next_path = _join_tree_path(target_parent_path, _tree_base_name(project_file.name))
+        _assert_tree_path_available(db, project_id, next_path, ignore_file_id=project_file.id)
+        project_file.name = next_path
+    else:
+        folder = db.query(models.ProjectFolder).filter(models.ProjectFolder.id == move_in.id, models.ProjectFolder.project_id == project_id).first()
+        if not folder:
+            raise HTTPException(status_code=404, detail="Folder not found")
+        if target_parent_path == folder.path or target_parent_path.startswith(f"{folder.path}/"):
+            raise HTTPException(status_code=400, detail="A folder cannot be moved into itself")
+        next_path = _join_tree_path(target_parent_path, _tree_base_name(folder.path))
+        _move_folder_subtree(db, project_id, folder, next_path)
+
+    _apply_tree_order(db, project_id, target_parent_path, move_in.ordered_siblings)
+    db.commit()
+    await _broadcast_project_tree(db, project_id)
+    return _project_tree_payload(db, project_id, include_revs=True)
+
+
 @app.patch("/projects/{project_id}/block-documents/{document_id}", response_model=schemas.ProjectBlockDocumentOut)
-def update_block_document(
+async def update_block_document(
     project_id: int,
     document_id: int,
     document_in: schemas.ProjectBlockDocumentUpdate,
@@ -2318,11 +3359,12 @@ def update_block_document(
         document.generated_entry_module = document_in.generated_entry_module
     db.commit()
     db.refresh(document)
+    await _broadcast_project_tree(db, project_id)
     return document
 
 
 @app.delete("/projects/{project_id}/block-documents/{document_id}")
-def delete_block_document(
+async def delete_block_document(
     project_id: int,
     document_id: int,
     current_user: models.User = Depends(get_current_user),
@@ -2354,6 +3396,7 @@ def delete_block_document(
         project.entry_block_document_id = replacement.id if replacement else None
 
     db.commit()
+    await _broadcast_project_tree(db, project_id)
     return {"status": "deleted"}
 
 
@@ -2559,6 +3602,127 @@ def _project_snapshot_payload(snapshot: models.ProjectSnapshot) -> Dict[str, Any
     }
 
 
+def _normalize_snapshot_name(name: Optional[str], fallback: Optional[str] = None) -> str:
+    snapshot_name = (name or "").strip()
+    if not snapshot_name:
+        snapshot_name = (fallback or "").strip()
+    if not snapshot_name:
+        snapshot_name = f"Checkpoint {dt.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
+    if len(snapshot_name) > 120:
+        raise HTTPException(status_code=400, detail="Snapshot name is too long (max 120 characters)")
+    return snapshot_name
+
+
+def _default_restore_safety_snapshot_name(snapshot_name: str) -> str:
+    prefix = "Before restoring checkpoint: "
+    suffix = (snapshot_name or "checkpoint").strip() or "checkpoint"
+    max_suffix_length = max(1, 120 - len(prefix))
+    trimmed_suffix = suffix[:max_suffix_length].rstrip() or "checkpoint"
+    return f"{prefix}{trimmed_suffix}"
+
+
+def _load_project_snapshot(db: Session, project_id: int, snapshot_id: int) -> models.ProjectSnapshot:
+    snapshot = (
+        db.query(models.ProjectSnapshot)
+        .filter(models.ProjectSnapshot.project_id == project_id, models.ProjectSnapshot.id == snapshot_id)
+        .first()
+    )
+    if not snapshot:
+        raise HTTPException(status_code=404, detail="Snapshot not found")
+    return snapshot
+
+
+def _load_snapshot_files(db: Session, snapshot_id: int) -> List[models.ProjectSnapshotFile]:
+    return (
+        db.query(models.ProjectSnapshotFile)
+        .filter(models.ProjectSnapshotFile.snapshot_id == snapshot_id)
+        .order_by(models.ProjectSnapshotFile.file_name.asc(), models.ProjectSnapshotFile.id.asc())
+        .all()
+    )
+
+
+def _load_project_files_by_name(db: Session, project_id: int) -> Dict[str, models.ProjectFile]:
+    return {
+        project_file.name: project_file
+        for project_file in db.query(models.ProjectFile).filter(models.ProjectFile.project_id == project_id).all()
+    }
+
+
+def _build_snapshot_diff_files(
+    snapshot_files: List[models.ProjectSnapshotFile],
+    current_files: Dict[str, models.ProjectFile],
+) -> tuple[List[Dict[str, Any]], int]:
+    status_rank = {"modified": 0, "deleted": 1, "added": 2, "unchanged": 3}
+    snapshot_files_by_name = {snapshot_file.file_name: snapshot_file for snapshot_file in snapshot_files}
+    entries: List[Dict[str, Any]] = []
+    changed_file_count = 0
+
+    for file_name in sorted(set(snapshot_files_by_name.keys()) | set(current_files.keys()), key=lambda value: value.lower()):
+        snapshot_file = snapshot_files_by_name.get(file_name)
+        current_file = current_files.get(file_name)
+        snapshot_content = snapshot_file.content or "" if snapshot_file else ""
+        current_content = current_file.content or "" if current_file else ""
+
+        if snapshot_file and current_file:
+            status_name = "unchanged" if snapshot_content == current_content else "modified"
+        elif snapshot_file:
+            status_name = "deleted"
+        else:
+            status_name = "added"
+
+        if status_name != "unchanged":
+            changed_file_count += 1
+
+        entries.append(
+            {
+                "file_name": file_name,
+                "status": status_name,
+                "current_file_id": current_file.id if current_file else None,
+                "snapshot_content": snapshot_content,
+                "current_content": current_content,
+            }
+        )
+
+    entries.sort(key=lambda entry: (status_rank.get(entry["status"], 99), entry["file_name"].lower(), entry["file_name"]))
+    return entries, changed_file_count
+
+
+def _create_project_snapshot_record(
+    db: Session,
+    project_id: int,
+    *,
+    actor: models.User,
+    snapshot_name: str,
+) -> models.ProjectSnapshot:
+    project_files = (
+        db.query(models.ProjectFile)
+        .filter(models.ProjectFile.project_id == project_id)
+        .order_by(models.ProjectFile.sort_order.asc(), models.ProjectFile.created_at.asc(), models.ProjectFile.id.asc())
+        .all()
+    )
+    actor_name = (actor.display_name or actor.username).strip() or actor.username
+    snapshot = models.ProjectSnapshot(
+        project_id=project_id,
+        name=snapshot_name,
+        created_by_user_id=actor.id,
+        created_by_name=actor_name,
+    )
+    db.add(snapshot)
+    db.flush()
+
+    for project_file in project_files:
+        in_memory = _file_states.get(project_file.id)
+        content = in_memory.content if in_memory and in_memory.project_id == project_id else (project_file.content or "")
+        db.add(
+            models.ProjectSnapshotFile(
+                snapshot_id=snapshot.id,
+                file_name=project_file.name,
+                content=content,
+            )
+        )
+    return snapshot
+
+
 _ARCHIVE_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._-]+")
 
 
@@ -2610,6 +3774,25 @@ def list_project_snapshots(
     return [_project_snapshot_payload(snapshot) for snapshot in snapshots]
 
 
+@app.get("/projects/{project_id}/snapshots/{snapshot_id}/inspect", response_model=schemas.ProjectSnapshotInspectOut)
+def inspect_project_snapshot(
+    project_id: int,
+    snapshot_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _ensure_project_access(db, project_id, current_user)
+    snapshot = _load_project_snapshot(db, project_id, snapshot_id)
+    snapshot_files = _load_snapshot_files(db, snapshot.id)
+    current_files = _load_project_files_by_name(db, project_id)
+    diff_files, changed_file_count = _build_snapshot_diff_files(snapshot_files, current_files)
+    return {
+        "snapshot": _project_snapshot_payload(snapshot),
+        "files": diff_files,
+        "changed_file_count": changed_file_count,
+    }
+
+
 @app.get("/projects/{project_id}/snapshots/{snapshot_id}/export")
 def export_project_snapshot(
     project_id: int,
@@ -2618,20 +3801,9 @@ def export_project_snapshot(
     db: Session = Depends(get_db),
 ):
     project = _ensure_project_access(db, project_id, current_user)
-    snapshot = (
-        db.query(models.ProjectSnapshot)
-        .filter(models.ProjectSnapshot.project_id == project_id, models.ProjectSnapshot.id == snapshot_id)
-        .first()
-    )
-    if not snapshot:
-        raise HTTPException(status_code=404, detail="Snapshot not found")
+    snapshot = _load_project_snapshot(db, project_id, snapshot_id)
 
-    python_files = (
-        db.query(models.ProjectSnapshotFile)
-        .filter(models.ProjectSnapshotFile.snapshot_id == snapshot.id)
-        .order_by(models.ProjectSnapshotFile.file_name.asc(), models.ProjectSnapshotFile.id.asc())
-        .all()
-    )
+    python_files = _load_snapshot_files(db, snapshot.id)
     python_files = [snapshot_file for snapshot_file in python_files if snapshot_file.file_name.lower().endswith(".py")]
     if not python_files:
         raise HTTPException(status_code=400, detail="No Python checkpoint files to export")
@@ -2664,38 +3836,8 @@ async def create_project_snapshot(
     db: Session = Depends(get_db),
 ):
     _ensure_project_access(db, project_id, current_user, require_write=True)
-    snapshot_name = (body.name or "").strip()
-    if not snapshot_name:
-        snapshot_name = f"Checkpoint {dt.datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S UTC')}"
-    if len(snapshot_name) > 120:
-        raise HTTPException(status_code=400, detail="Snapshot name is too long (max 120 characters)")
-
-    project_files = (
-        db.query(models.ProjectFile)
-        .filter(models.ProjectFile.project_id == project_id)
-        .order_by(models.ProjectFile.created_at.asc(), models.ProjectFile.id.asc())
-        .all()
-    )
-    actor_name = (current_user.display_name or current_user.username).strip() or current_user.username
-    snapshot = models.ProjectSnapshot(
-        project_id=project_id,
-        name=snapshot_name,
-        created_by_user_id=current_user.id,
-        created_by_name=actor_name,
-    )
-    db.add(snapshot)
-    db.flush()
-
-    for project_file in project_files:
-        in_memory = _file_states.get(project_file.id)
-        content = in_memory.content if in_memory and in_memory.project_id == project_id else (project_file.content or "")
-        db.add(
-            models.ProjectSnapshotFile(
-                snapshot_id=snapshot.id,
-                file_name=project_file.name,
-                content=content,
-            )
-        )
+    snapshot_name = _normalize_snapshot_name(body.name)
+    snapshot = _create_project_snapshot_record(db, project_id, actor=current_user, snapshot_name=snapshot_name)
     db.commit()
     db.refresh(snapshot)
 
@@ -2704,40 +3846,66 @@ async def create_project_snapshot(
     return payload
 
 
-@app.post("/projects/{project_id}/snapshots/{snapshot_id}/restore")
+@app.post("/projects/{project_id}/snapshots/{snapshot_id}/restore", response_model=schemas.ProjectSnapshotRestoreOut)
 async def restore_project_snapshot(
     project_id: int,
     snapshot_id: int,
+    body: Optional[schemas.ProjectSnapshotRestoreRequest] = None,
     current_user: models.User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
     _ensure_project_access(db, project_id, current_user, require_write=True)
-    snapshot = (
-        db.query(models.ProjectSnapshot)
-        .filter(models.ProjectSnapshot.id == snapshot_id, models.ProjectSnapshot.project_id == project_id)
-        .first()
-    )
-    if not snapshot:
-        raise HTTPException(status_code=404, detail="Snapshot not found")
-
-    snapshot_files = (
-        db.query(models.ProjectSnapshotFile)
-        .filter(models.ProjectSnapshotFile.snapshot_id == snapshot.id)
-        .order_by(models.ProjectSnapshotFile.file_name.asc(), models.ProjectSnapshotFile.id.asc())
-        .all()
-    )
+    request = body or schemas.ProjectSnapshotRestoreRequest()
+    snapshot = _load_project_snapshot(db, project_id, snapshot_id)
+    snapshot_files = _load_snapshot_files(db, snapshot.id)
     if not snapshot_files:
         raise HTTPException(status_code=400, detail="Snapshot has no files")
 
-    snapshot_names = {snapshot_file.file_name for snapshot_file in snapshot_files}
-    existing_files = {
-        project_file.name: project_file
-        for project_file in db.query(models.ProjectFile).filter(models.ProjectFile.project_id == project_id).all()
-    }
+    snapshot_files_by_name = {snapshot_file.file_name: snapshot_file for snapshot_file in snapshot_files}
+    existing_files = _load_project_files_by_name(db, project_id)
+    selected_file_names = request.file_names
+    is_partial_restore = bool(selected_file_names)
+    restore_scope = "partial" if is_partial_restore else "full"
+
+    if is_partial_restore:
+        missing_targets = [
+            file_name
+            for file_name in selected_file_names
+            if file_name not in snapshot_files_by_name and file_name not in existing_files
+        ]
+        if missing_targets:
+            raise HTTPException(status_code=400, detail="One or more selected files are no longer available")
+        delete_file_names = [
+            file_name
+            for file_name in selected_file_names
+            if file_name not in snapshot_files_by_name and file_name in existing_files
+        ]
+        if delete_file_names and not request.allow_added_file_deletions:
+            raise HTTPException(status_code=400, detail="Deletion confirmation required for added files")
+        restore_files = [snapshot_files_by_name[file_name] for file_name in selected_file_names if file_name in snapshot_files_by_name]
+    else:
+        delete_file_names = [file_name for file_name in existing_files.keys() if file_name not in snapshot_files_by_name]
+        restore_files = snapshot_files
+
+    safety_snapshot = None
+    if request.create_safety_snapshot:
+        requested_safety_name = request.safety_snapshot_name
+        safety_snapshot_name = _normalize_snapshot_name(
+            requested_safety_name,
+            _default_restore_safety_snapshot_name(snapshot.name),
+        )
+        safety_snapshot = _create_project_snapshot_record(
+            db,
+            project_id,
+            actor=current_user,
+            snapshot_name=safety_snapshot_name,
+        )
 
     removed_count = 0
-    for file_name, project_file in list(existing_files.items()):
-        if file_name in snapshot_names:
+    restored_file_names: List[str] = []
+    for file_name in delete_file_names:
+        project_file = existing_files.get(file_name)
+        if project_file is None:
             continue
         state = _file_states.pop(project_file.id, None)
         if state and state.persist_task and not state.persist_task.done():
@@ -2746,9 +3914,10 @@ async def restore_project_snapshot(
         db.delete(project_file)
         existing_files.pop(file_name, None)
         removed_count += 1
+        restored_file_names.append(file_name)
 
     touched: List[models.ProjectFile] = []
-    for snapshot_file in snapshot_files:
+    for snapshot_file in restore_files:
         existing = existing_files.get(snapshot_file.file_name)
         if existing is None:
             existing = models.ProjectFile(
@@ -2760,14 +3929,21 @@ async def restore_project_snapshot(
             db.flush()
             existing_files[snapshot_file.file_name] = existing
             touched.append(existing)
+            restored_file_names.append(snapshot_file.file_name)
             continue
 
         new_content = snapshot_file.content or ""
         if (existing.content or "") != new_content:
             existing.content = new_content
             touched.append(existing)
+            restored_file_names.append(snapshot_file.file_name)
 
     db.commit()
+    db.refresh(snapshot)
+    safety_snapshot_payload = None
+    if safety_snapshot is not None:
+        db.refresh(safety_snapshot)
+        safety_snapshot_payload = _project_snapshot_payload(safety_snapshot)
 
     project_files = (
         db.query(models.ProjectFile)
@@ -2809,9 +3985,11 @@ async def restore_project_snapshot(
                 "id": project_file.id,
                 "name": project_file.name,
                 "content": state.content,
+                "sort_order": project_file.sort_order or 0,
                 "rev": state.rev,
             }
         )
+    payload_folders = [_project_folder_payload(folder) for folder in _ordered_project_folders(db, project_id)]
     payload_block_documents = []
     project = db.query(models.Project).filter(models.Project.id == project_id).first()
     if project and _project_supports_blocks(project):
@@ -2829,9 +4007,15 @@ async def restore_project_snapshot(
                 _block_locks.setdefault(block_document.id, asyncio.Lock())
             payload_block_documents.append(_project_block_document_payload(block_document, rev=state.rev))
     payload_tasks = [_project_task_payload(task) for task in tasks]
+    if safety_snapshot_payload is not None:
+        await sio.emit(
+            "snapshot_created",
+            {"projectId": project_id, "snapshot": safety_snapshot_payload},
+            room=f"project_{project_id}",
+        )
     await sio.emit(
         "project_state",
-        {"projectId": project_id, "files": payload_files, "blockDocuments": payload_block_documents, "tasks": payload_tasks},
+        {"projectId": project_id, "files": payload_files, "folders": payload_folders, "blockDocuments": payload_block_documents, "tasks": payload_tasks},
         room=f"project_{project_id}",
     )
 
@@ -2841,13 +4025,22 @@ async def restore_project_snapshot(
             "projectId": project_id,
             "snapshot": _project_snapshot_payload(snapshot),
             "updatedFiles": len(touched) + removed_count,
+            "restoreScope": restore_scope,
+            "restoredFileNames": restored_file_names,
             "restoredByUserId": current_user.id,
             "restoredByName": (current_user.display_name or current_user.username).strip() or current_user.username,
         },
         room=f"project_{project_id}",
     )
 
-    return {"status": "restored", "updated_files": len(touched) + removed_count, "snapshot_id": snapshot.id}
+    return {
+        "status": "restored",
+        "updated_files": len(touched) + removed_count,
+        "snapshot_id": snapshot.id,
+        "restore_scope": restore_scope,
+        "restored_file_names": restored_file_names,
+        "safety_snapshot": safety_snapshot_payload,
+    }
 
 
 @app.delete("/projects/{project_id}/snapshots/{snapshot_id}")
@@ -2913,12 +4106,20 @@ def create_share_token(project_id: int, current_user: models.User = Depends(get_
 
 
 @app.post("/projects/access/{token}", response_model=schemas.ProjectOut)
-def access_via_token(token: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+def access_via_token(
+    token: str,
+    request: Request,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    _enforce_join_code_rate_limit(request, current_user.id)
     normalized_token = _normalize_share_token(token)
     if not normalized_token:
         raise HTTPException(status_code=404, detail="Project not found")
     project = db.query(models.Project).filter(models.Project.share_pin == normalized_token).first()
     if not project:
+        raise HTTPException(status_code=404, detail="Project not found")
+    if _project_owner_is_banned(db, project):
         raise HTTPException(status_code=404, detail="Project not found")
     # Share-joining a PyBricks project should grant edit access even when the project is public.
     existing = (
@@ -2935,7 +4136,7 @@ def access_via_token(token: str, current_user: models.User = Depends(get_current
         db.add(collab)
         db.commit()
         db.refresh(project)
-    return _project_payload(db, project)
+    return _project_payload_for_user(db, project, current_user)
 
 
 @app.post("/projects/{project_id}/run")
@@ -2975,6 +4176,8 @@ async def _get_user_from_token(token: str):
         db = SessionLocal()
         try:
             user = db.query(models.User).filter(models.User.id == user_id).first()
+            if user is None or user.is_banned:
+                return None
             return user
         finally:
             db.close()
@@ -2987,6 +4190,8 @@ def _user_can_access_project(user_id: int, project_id: int) -> bool:
     try:
         project = db.query(models.Project).filter(models.Project.id == project_id).first()
         if not project:
+            return False
+        if _project_owner_is_banned(db, project):
             return False
         if project.owner_id == user_id:
             return True
@@ -3007,6 +4212,8 @@ def _user_can_edit_project(user_id: int, project_id: int) -> bool:
     try:
         project = db.query(models.Project).filter(models.Project.id == project_id).first()
         if not project:
+            return False
+        if _project_owner_is_banned(db, project):
             return False
         if project.owner_id == user_id:
             return True
@@ -3114,6 +4321,100 @@ def _voice_participants_payload(project_id: int) -> List[Dict[str, Any]]:
     return participants
 
 
+def _remote_hub_public_payload(project_id: int) -> Optional[Dict[str, Any]]:
+    session = _remote_hub_sessions.get(project_id)
+    if not session:
+        return None
+
+    guests = []
+    for guest_user_id, guest_user_name in session.guests.items():
+        connected = any(
+            info.get("project_id") == project_id and info.get("user_id") == guest_user_id
+            for info in _sid_info.values()
+        )
+        guests.append(
+            {
+                "userId": guest_user_id,
+                "userName": guest_user_name,
+                "connected": connected,
+            }
+        )
+
+    guests.sort(key=lambda item: (item["userName"].lower(), item["userId"]))
+
+    return {
+        "host": {
+            "userId": session.host_user_id,
+            "userName": session.host_user_name,
+            "deviceName": session.device_name,
+            "transport": session.transport,
+            "transportLabel": session.transport_label,
+            "hubRunning": session.hub_running,
+        },
+        "guests": guests,
+        "pendingUserIds": sorted(session.pending.keys()),
+    }
+
+
+def _remote_hub_pending_payload(project_id: int, sid: str) -> List[Dict[str, Any]]:
+    session = _remote_hub_sessions.get(project_id)
+    if not session or session.host_sid != sid:
+        return []
+    pending = [
+        {
+            "userId": request.user_id,
+            "userName": request.user_name,
+        }
+        for request in session.pending.values()
+    ]
+    pending.sort(key=lambda item: (item["userName"].lower(), item["userId"]))
+    return pending
+
+
+def _project_user_sids(project_id: int, user_id: int) -> List[str]:
+    return [
+        sid
+        for sid, info in _sid_info.items()
+        if info.get("project_id") == project_id and info.get("user_id") == user_id
+    ]
+
+
+def _remote_hub_guest_sids(project_id: int) -> List[str]:
+    session = _remote_hub_sessions.get(project_id)
+    if not session:
+        return []
+    guest_sids: List[str] = []
+    for guest_user_id in session.guests.keys():
+        guest_sids.extend(_project_user_sids(project_id, guest_user_id))
+    return guest_sids
+
+
+async def _emit_remote_hub_pending(project_id: int) -> None:
+    session = _remote_hub_sessions.get(project_id)
+    if not session:
+        return
+    await sio.emit(
+        "remote_hub_pending_requests",
+        {
+            "projectId": project_id,
+            "requests": _remote_hub_pending_payload(project_id, session.host_sid),
+        },
+        room=session.host_sid,
+    )
+
+
+async def _broadcast_remote_hub_state(project_id: int) -> None:
+    await sio.emit(
+        "remote_hub_state",
+        {
+            "projectId": project_id,
+            "session": _remote_hub_public_payload(project_id),
+        },
+        room=f"project_{project_id}",
+    )
+    await _emit_remote_hub_pending(project_id)
+
+
 @sio.event
 async def connect(sid, environ, auth=None):
     query = environ.get("QUERY_STRING", "")
@@ -3142,6 +4443,8 @@ async def connect(sid, environ, auth=None):
         db = SessionLocal()
         try:
             if share_token:
+                if not _socket_join_code_rate_limit_allowed(environ, user.id):
+                    return False
                 normalized_share_token = _normalize_share_token(share_token)
                 if normalized_share_token:
                     project = db.query(models.Project).filter(
@@ -3204,7 +4507,13 @@ async def connect(sid, environ, auth=None):
         files = (
             db2.query(models.ProjectFile)
             .filter(models.ProjectFile.project_id == pid)
-            .order_by(models.ProjectFile.created_at.asc())
+            .order_by(models.ProjectFile.sort_order.asc(), models.ProjectFile.created_at.asc(), models.ProjectFile.id.asc())
+            .all()
+        )
+        folders = (
+            db2.query(models.ProjectFolder)
+            .filter(models.ProjectFolder.project_id == pid)
+            .order_by(models.ProjectFolder.sort_order.asc(), models.ProjectFolder.path.asc(), models.ProjectFolder.id.asc())
             .all()
         )
         tasks = (
@@ -3226,7 +4535,8 @@ async def connect(sid, environ, auth=None):
                 state = _FileSyncState(project_id=pid, content=f.content or "")
                 _file_states[f.id] = state
                 _file_locks.setdefault(f.id, asyncio.Lock())
-            payload_files.append({"id": f.id, "name": f.name, "content": state.content, "rev": state.rev})
+            payload_files.append({"id": f.id, "name": f.name, "content": state.content, "sort_order": f.sort_order or 0, "rev": state.rev})
+        payload_folders = [_project_folder_payload(folder) for folder in folders]
         payload_block_documents = []
         if project and _project_supports_blocks(project):
             for block_document in block_documents:
@@ -3245,9 +4555,12 @@ async def connect(sid, environ, auth=None):
         {
             "projectId": pid,
             "files": payload_files,
+            "folders": payload_folders,
             "blockDocuments": payload_block_documents,
             "tasks": payload_tasks,
             "voiceParticipants": payload_voice,
+            "remoteHubSession": _remote_hub_public_payload(pid),
+            "remoteHubPendingRequests": _remote_hub_pending_payload(pid, sid),
         },
         room=sid,
     )
@@ -3264,6 +4577,19 @@ async def disconnect(sid):
     for pid in to_remove:
         presence[pid].pop(sid, None)
         await _broadcast_presence(pid)
+
+    for pid, remote_session in list(_remote_hub_sessions.items()):
+        if remote_session.host_sid == sid:
+            _remote_hub_sessions.pop(pid, None)
+            await _broadcast_remote_hub_state(pid)
+            continue
+
+        pending_user_ids = [user_id for user_id, request in remote_session.pending.items() if request.sid == sid]
+        if not pending_user_ids:
+            continue
+        for user_id in pending_user_ids:
+            remote_session.pending.pop(user_id, None)
+        await _broadcast_remote_hub_state(pid)
 
     voice_project_id = session.get("project_id") if session else None
     if voice_project_id is not None:
@@ -3474,10 +4800,8 @@ async def file_op(sid, data):
     if not isinstance(op_id, str) or not op_id:
         return
 
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid:
-        return
-    if not session.get("can_edit"):
+    session = _get_project_socket_session(sid, pid, require_edit=True)
+    if not session:
         return
     user_id = int(session["user_id"])
     state = _file_states.get(fid)
@@ -3573,8 +4897,8 @@ async def sync_file(sid, data):
     except (TypeError, ValueError):
         return
 
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid:
+    session = _get_project_socket_session(sid, pid)
+    if not session:
         return
 
     db = SessionLocal()
@@ -3645,8 +4969,8 @@ async def blocks_op(sid, data):
     if workspace_json is not None and not isinstance(workspace_json, str):
         workspace_json = None
 
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid or not session.get("can_edit"):
+    session = _get_project_socket_session(sid, pid, require_edit=True)
+    if not session:
         return
 
     user_id = int(session["user_id"])
@@ -3740,8 +5064,8 @@ async def blocks_sync_request(sid, data):
     except (TypeError, ValueError):
         return
 
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid:
+    session = _get_project_socket_session(sid, pid)
+    if not session:
         return
 
     db = SessionLocal()
@@ -3820,7 +5144,61 @@ async def blocks_presence(sid, data):
 
 
 @sio.event
-async def voice_join(sid, data):
+async def remote_hub_host_state(sid, data):
+    if not isinstance(data, dict):
+        return
+    project_id = data.get("projectId")
+    connected = data.get("connected")
+    if project_id is None or not isinstance(connected, bool):
+        return
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return
+
+    session = _sid_info.get(sid)
+    if not session or session.get("project_id") != pid or not session.get("can_edit"):
+        return
+
+    existing = _remote_hub_sessions.get(pid)
+    if not connected:
+        if existing and existing.host_sid == sid:
+            _remote_hub_sessions.pop(pid, None)
+            await _broadcast_remote_hub_state(pid)
+        return
+
+    if existing and existing.host_sid != sid and existing.host_user_id != int(session["user_id"]):
+        await sio.emit(
+            "remote_hub_host_conflict",
+            {
+                "projectId": pid,
+                "message": f"{existing.host_user_name} is already hosting the project hub.",
+                "hostUserId": existing.host_user_id,
+                "hostUserName": existing.host_user_name,
+            },
+            room=sid,
+        )
+        return
+
+    remote_session = existing or _RemoteHubSession(
+        project_id=pid,
+        host_sid=sid,
+        host_user_id=int(session["user_id"]),
+        host_user_name=session.get("name") or f"User {session['user_id']}",
+    )
+    remote_session.host_sid = sid
+    remote_session.host_user_id = int(session["user_id"])
+    remote_session.host_user_name = session.get("name") or f"User {session['user_id']}"
+    remote_session.device_name = str(data.get("deviceName") or "").strip()
+    remote_session.transport = str(data.get("transport") or "").strip()
+    remote_session.transport_label = str(data.get("transportLabel") or "").strip()
+    remote_session.hub_running = bool(data.get("hubRunning"))
+    _remote_hub_sessions[pid] = remote_session
+    await _broadcast_remote_hub_state(pid)
+
+
+@sio.event
+async def remote_hub_request_access(sid, data):
     if not isinstance(data, dict):
         return
     project_id = data.get("projectId")
@@ -3832,7 +5210,266 @@ async def voice_join(sid, data):
         return
 
     session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid or not session.get("can_edit"):
+    remote_session = _remote_hub_sessions.get(pid)
+    if not session or session.get("project_id") != pid or not session.get("can_edit") or not remote_session:
+        return
+
+    user_id = int(session["user_id"])
+    if user_id == remote_session.host_user_id:
+        return
+    if user_id in remote_session.guests:
+        await sio.emit(
+            "remote_hub_request_resolved",
+            {
+                "projectId": pid,
+                "approved": True,
+                "hostUserId": remote_session.host_user_id,
+                "hostUserName": remote_session.host_user_name,
+            },
+            room=sid,
+        )
+        return
+
+    remote_session.pending[user_id] = _RemoteHubAccessRequest(
+        user_id=user_id,
+        user_name=session.get("name") or f"User {session['user_id']}",
+        sid=sid,
+    )
+    await _broadcast_remote_hub_state(pid)
+
+
+@sio.event
+async def remote_hub_respond_request(sid, data):
+    if not isinstance(data, dict):
+        return
+    project_id = data.get("projectId")
+    guest_user_id = data.get("guestUserId")
+    approved = data.get("approved")
+    if project_id is None or not isinstance(guest_user_id, int) or not isinstance(approved, bool):
+        return
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return
+
+    session = _sid_info.get(sid)
+    remote_session = _remote_hub_sessions.get(pid)
+    if not session or not remote_session or remote_session.host_sid != sid or session.get("project_id") != pid:
+        return
+
+    request = remote_session.pending.pop(guest_user_id, None)
+    if approved:
+        guest_name = request.user_name if request else f"User {guest_user_id}"
+        remote_session.guests[guest_user_id] = guest_name
+    await _broadcast_remote_hub_state(pid)
+
+    for guest_sid in _project_user_sids(pid, guest_user_id):
+        await sio.emit(
+            "remote_hub_request_resolved",
+            {
+                "projectId": pid,
+                "approved": approved,
+                "hostUserId": remote_session.host_user_id,
+                "hostUserName": remote_session.host_user_name,
+            },
+            room=guest_sid,
+        )
+
+
+@sio.event
+async def remote_hub_revoke_access(sid, data):
+    if not isinstance(data, dict):
+        return
+    project_id = data.get("projectId")
+    guest_user_id = data.get("guestUserId")
+    if project_id is None or not isinstance(guest_user_id, int):
+        return
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return
+
+    session = _sid_info.get(sid)
+    remote_session = _remote_hub_sessions.get(pid)
+    if not session or not remote_session or remote_session.host_sid != sid or session.get("project_id") != pid:
+        return
+
+    removed = remote_session.guests.pop(guest_user_id, None)
+    remote_session.pending.pop(guest_user_id, None)
+    await _broadcast_remote_hub_state(pid)
+    if removed is None:
+        return
+
+    for guest_sid in _project_user_sids(pid, guest_user_id):
+        await sio.emit(
+            "remote_hub_access_revoked",
+            {
+                "projectId": pid,
+                "hostUserId": remote_session.host_user_id,
+                "hostUserName": remote_session.host_user_name,
+            },
+            room=guest_sid,
+        )
+
+
+@sio.event
+async def remote_hub_run_request(sid, data):
+    if not isinstance(data, dict):
+        return
+    project_id = data.get("projectId")
+    run_request = data.get("runRequest")
+    if project_id is None or not isinstance(run_request, dict):
+        return
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return
+
+    session = _sid_info.get(sid)
+    remote_session = _remote_hub_sessions.get(pid)
+    if not session or not remote_session or session.get("project_id") != pid:
+        return
+
+    user_id = int(session["user_id"])
+    if user_id not in remote_session.guests:
+        await sio.emit(
+            "remote_hub_error",
+            {
+                "projectId": pid,
+                "message": "Remote hub access is required before you can run code.",
+            },
+            room=sid,
+        )
+        return
+
+    await sio.emit(
+        "remote_hub_execute_run",
+        {
+            "projectId": pid,
+            "requestedByUserId": user_id,
+            "requestedByUserName": session.get("name") or f"User {session['user_id']}",
+            "runRequest": run_request,
+        },
+        room=remote_session.host_sid,
+    )
+
+
+@sio.event
+async def remote_hub_stop_request(sid, data):
+    if not isinstance(data, dict):
+        return
+    project_id = data.get("projectId")
+    if project_id is None:
+        return
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return
+
+    session = _sid_info.get(sid)
+    remote_session = _remote_hub_sessions.get(pid)
+    if not session or not remote_session or session.get("project_id") != pid:
+        return
+
+    user_id = int(session["user_id"])
+    if user_id not in remote_session.guests:
+        await sio.emit(
+            "remote_hub_error",
+            {
+                "projectId": pid,
+                "message": "Remote hub access is required before you can stop the shared hub.",
+            },
+            room=sid,
+        )
+        return
+
+    await sio.emit(
+        "remote_hub_execute_stop",
+        {
+            "projectId": pid,
+            "requestedByUserId": user_id,
+            "requestedByUserName": session.get("name") or f"User {session['user_id']}",
+        },
+        room=remote_session.host_sid,
+    )
+
+
+@sio.event
+async def remote_hub_run_started(sid, data):
+    if not isinstance(data, dict):
+        return
+    project_id = data.get("projectId")
+    if project_id is None:
+        return
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return
+
+    session = _sid_info.get(sid)
+    remote_session = _remote_hub_sessions.get(pid)
+    if not session or not remote_session or remote_session.host_sid != sid or session.get("project_id") != pid:
+        return
+
+    payload = {
+        "projectId": pid,
+        "fileName": str(data.get("fileName") or "").strip() or "unknown.py",
+        "requestedByUserId": data.get("requestedByUserId"),
+        "requestedByUserName": str(data.get("requestedByUserName") or "").strip() or remote_session.host_user_name,
+        "hostUserId": remote_session.host_user_id,
+        "hostUserName": remote_session.host_user_name,
+    }
+    for guest_sid in _remote_hub_guest_sids(pid):
+        await sio.emit("remote_hub_run_started", payload, room=guest_sid)
+
+
+@sio.event
+async def remote_hub_runtime_event(sid, data):
+    if not isinstance(data, dict):
+        return
+    project_id = data.get("projectId")
+    kind = data.get("kind")
+    if project_id is None or not isinstance(kind, str):
+        return
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return
+
+    session = _sid_info.get(sid)
+    remote_session = _remote_hub_sessions.get(pid)
+    if not session or not remote_session or remote_session.host_sid != sid or session.get("project_id") != pid:
+        return
+
+    payload = {"projectId": pid, "kind": kind}
+    if kind in {"stdout", "stderr"}:
+        payload["data"] = str(data.get("data") or "")
+    elif kind == "status":
+        payload["state"] = str(data.get("state") or "")
+    elif kind == "run_result":
+        payload["runId"] = data.get("runId")
+        payload["returnCode"] = data.get("returnCode")
+    else:
+        return
+
+    for guest_sid in _remote_hub_guest_sids(pid):
+        await sio.emit("remote_hub_runtime_event", payload, room=guest_sid)
+
+
+@sio.event
+async def voice_join(sid, data):
+    if not isinstance(data, dict):
+        return
+    project_id = data.get("projectId")
+    if project_id is None:
+        return
+    try:
+        pid = int(project_id)
+    except (TypeError, ValueError):
+        return
+
+    session = _get_project_socket_session(sid, pid, require_edit=True)
+    if not session:
         return
 
     room = voice_rooms.setdefault(pid, {})
@@ -3872,8 +5509,8 @@ async def voice_leave(sid, data):
     except (TypeError, ValueError):
         return
 
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid or not session.get("can_edit"):
+    session = _get_project_socket_session(sid, pid, require_edit=True)
+    if not session:
         return
 
     room = voice_rooms.get(pid)
@@ -3906,8 +5543,8 @@ async def voice_offer(sid, data):
         pid = int(project_id)
     except (TypeError, ValueError):
         return
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid or not session.get("can_edit"):
+    session = _get_project_socket_session(sid, pid, require_edit=True)
+    if not session:
         return
     room = voice_rooms.get(pid) or {}
     if sid not in room or to_sid not in room:
@@ -3938,8 +5575,8 @@ async def voice_answer(sid, data):
         pid = int(project_id)
     except (TypeError, ValueError):
         return
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid or not session.get("can_edit"):
+    session = _get_project_socket_session(sid, pid, require_edit=True)
+    if not session:
         return
     room = voice_rooms.get(pid) or {}
     if sid not in room or to_sid not in room:
@@ -3970,8 +5607,8 @@ async def voice_ice(sid, data):
         pid = int(project_id)
     except (TypeError, ValueError):
         return
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid or not session.get("can_edit"):
+    session = _get_project_socket_session(sid, pid, require_edit=True)
+    if not session:
         return
     room = voice_rooms.get(pid) or {}
     if sid not in room or to_sid not in room:
@@ -4000,8 +5637,8 @@ async def voice_state(sid, data):
         pid = int(project_id)
     except (TypeError, ValueError):
         return
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid or not session.get("can_edit"):
+    session = _get_project_socket_session(sid, pid, require_edit=True)
+    if not session:
         return
 
     room = voice_rooms.get(pid) or {}
@@ -4051,8 +5688,8 @@ async def session_chat(sid, data):
     except (TypeError, ValueError):
         return
 
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid:
+    session = _get_project_socket_session(sid, pid)
+    if not session:
         return
 
     message = message_raw.strip()
@@ -4085,8 +5722,8 @@ async def task_create(sid, data):
     except (TypeError, ValueError):
         return
 
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid or not session.get("can_edit"):
+    session = _get_project_socket_session(sid, pid, require_edit=True)
+    if not session:
         return
 
     content = (content_raw or "").strip() if isinstance(content_raw, str) else ""
@@ -4130,8 +5767,8 @@ async def task_update(sid, data):
     except (TypeError, ValueError):
         return
 
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid or not session.get("can_edit"):
+    session = _get_project_socket_session(sid, pid, require_edit=True)
+    if not session:
         return
 
     has_content = "content" in data
@@ -4237,8 +5874,8 @@ async def task_delete(sid, data):
     except (TypeError, ValueError):
         return
 
-    session = _sid_info.get(sid)
-    if not session or session.get("project_id") != pid or not session.get("can_edit"):
+    session = _get_project_socket_session(sid, pid, require_edit=True)
+    if not session:
         return
 
     db = SessionLocal()
@@ -4401,6 +6038,7 @@ def search_users(
     users = (
         db.query(models.User)
         .filter(
+            models.User.is_banned == False,
             models.User.username.ilike(pattern) | models.User.display_name.ilike(pattern)
         )
         .order_by(models.User.username)
@@ -4415,19 +6053,29 @@ def get_user_profile(
     db: Session = Depends(get_db),
     current_user: Optional[models.User] = Depends(get_optional_user),
 ):
-    user = db.query(models.User).filter(models.User.id == user_id).first()
-    if not user:
-        raise HTTPException(status_code=404, detail="User not found")
+    user = _require_visible_user(db, user_id)
     return _serialize_user(db, current_user.id if current_user else None, user)
 
 @app.get("/users/{user_id}/stats")
 def get_user_stats(user_id: int, db: Session = Depends(get_db)):
-    follower_count = db.query(models.Follow).filter(models.Follow.followed_id == user_id).count()
-    following_count = db.query(models.Follow).filter(models.Follow.follower_id == user_id).count()
+    _require_visible_user(db, user_id)
+    follower_count = (
+        db.query(models.Follow)
+        .join(models.User, models.User.id == models.Follow.follower_id)
+        .filter(models.Follow.followed_id == user_id, models.User.is_banned == False)
+        .count()
+    )
+    following_count = (
+        db.query(models.Follow)
+        .join(models.User, models.User.id == models.Follow.followed_id)
+        .filter(models.Follow.follower_id == user_id, models.User.is_banned == False)
+        .count()
+    )
     return {"followers": follower_count, "following": following_count}
 
 @app.get("/users/{user_id}/projects", response_model=List[schemas.ProjectOut])
 def get_user_public_projects(user_id: int, db: Session = Depends(get_db)):
+    _require_visible_user(db, user_id)
     # Profile pages only show PUBLIC projects - private projects are managed via Dashboard
     # Admin can view all projects from the Admin Dashboard
     projects = (
@@ -4448,9 +6096,13 @@ def get_user_followers(
     current_user: Optional[models.User] = Depends(get_optional_user),
 ):
     """Get list of users who follow this user"""
+    _require_visible_user(db, user_id)
     followers = db.query(models.User).join(
         models.Follow, models.Follow.follower_id == models.User.id
-    ).filter(models.Follow.followed_id == user_id).all()
+    ).filter(
+        models.Follow.followed_id == user_id,
+        models.User.is_banned == False,
+    ).all()
     return _serialize_users(db, current_user.id if current_user else None, followers)
 
 @app.get("/users/{user_id}/following", response_model=List[schemas.UserOut])
@@ -4460,9 +6112,13 @@ def get_user_following(
     current_user: Optional[models.User] = Depends(get_optional_user),
 ):
     """Get list of users this user follows"""
+    _require_visible_user(db, user_id)
     following = db.query(models.User).join(
         models.Follow, models.Follow.followed_id == models.User.id
-    ).filter(models.Follow.follower_id == user_id).all()
+    ).filter(
+        models.Follow.follower_id == user_id,
+        models.User.is_banned == False,
+    ).all()
     return _serialize_users(db, current_user.id if current_user else None, following)
 
 @app.post("/users/{user_id}/follow")
@@ -4470,9 +6126,7 @@ def follow_user(user_id: int, current_user: models.User = Depends(get_current_us
     if user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot follow yourself")
     
-    target = db.query(models.User).filter(models.User.id == user_id).first()
-    if not target:
-        raise HTTPException(status_code=404, detail="User not found")
+    _require_visible_user(db, user_id)
 
     if _is_blocked(db, current_user.id, user_id):
         raise HTTPException(status_code=403, detail="Cannot follow while blocked")
@@ -4488,6 +6142,7 @@ def follow_user(user_id: int, current_user: models.User = Depends(get_current_us
 
 @app.delete("/users/{user_id}/follow")
 def unfollow_user(user_id: int, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    _require_visible_user(db, user_id)
     existing = db.query(models.Follow).filter(models.Follow.follower_id == current_user.id, models.Follow.followed_id == user_id).first()
     if existing:
         db.delete(existing)
@@ -4621,6 +6276,9 @@ def get_inbox(current_user: models.User = Depends(get_current_user), db: Session
         if convo.status == "pending" and convo.requester_id != current_user.id:
             continue
         other_id = _get_other_user_id(convo, current_user.id)
+        other = _query_visible_user(db, other_id)
+        if not other:
+            continue
         if _block_state(db, current_user.id, other_id) == "blocked_by_them":
             continue
         filtered.append(convo)
@@ -4649,6 +6307,9 @@ def get_requests(current_user: models.User = Depends(get_current_user), db: Sess
         if convo.requester_id == current_user.id:
             continue
         other_id = _get_other_user_id(convo, current_user.id)
+        other = _query_visible_user(db, other_id)
+        if not other:
+            continue
         if _is_blocked(db, current_user.id, other_id):
             continue
         filtered.append(convo)
@@ -4672,6 +6333,8 @@ def get_conversation(
     if current_user.id not in (conversation.user_a_id, conversation.user_b_id):
         raise HTTPException(status_code=403, detail="Not a participant")
     other_id = _get_other_user_id(conversation, current_user.id)
+    if not _query_visible_user(db, other_id):
+        raise HTTPException(status_code=404, detail="Conversation not found")
     block_state = _block_state(db, current_user.id, other_id)
     if block_state == "blocked_by_them":
         raise HTTPException(status_code=403, detail="Messaging disabled")
@@ -4713,13 +6376,7 @@ def start_conversation(
 ):
     if payload.target_user_id == current_user.id:
         raise HTTPException(status_code=400, detail="Cannot message yourself")
-    target = (
-        db.query(models.User)
-        .filter(models.User.id == payload.target_user_id)
-        .first()
-    )
-    if not target:
-        raise HTTPException(status_code=404, detail="User not found")
+    target = _require_visible_user(db, payload.target_user_id)
     if _is_blocked(db, current_user.id, target.id):
         raise HTTPException(status_code=403, detail="Messaging disabled")
 
@@ -5106,7 +6763,7 @@ def toggle_project_visibility(project_id: int, current_user: models.User = Depen
     project.is_public = not project.is_public
     db.commit()
     db.refresh(project)
-    return _project_payload(db, project)
+    return _project_payload_for_user(db, project, current_user)
 
 # Moved to before /projects/{project_id}
 
@@ -5159,11 +6816,12 @@ def admin_create_project_for_user(user_id: int, project_in: schemas.ProjectCreat
         project_id=project.id,
         name="main.py",
         content=_project_starter_content(project.project_type),
+        sort_order=TREE_SORT_STEP,
     )
     db.add(default_file)
     db.commit()
     db.refresh(project)
-    return _project_payload(db, project)
+    return _project_payload_for_user(db, project, current_user)
 
 # --- Socket Logic Updates ---
 # see bottom for cursor/presence
@@ -5178,14 +6836,6 @@ if os.path.exists(INDEX_FILE):
     if os.path.isdir(vendor_dir):
         app.mount("/vendor", StaticFiles(directory=vendor_dir), name="vendor")
 
-    docs_dir = os.path.join(FRONTEND_DIST, "docs")
-    if os.path.isdir(docs_dir):
-        @app.get("/docs")
-        async def docs_redirect():
-            return RedirectResponse(url="/docs/")
-
-        app.mount("/docs", StaticFiles(directory=docs_dir, html=True), name="docs")
-    
     # Mount uploads
     upload_dir = UPLOADS_DIR
     os.makedirs(upload_dir, exist_ok=True)

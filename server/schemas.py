@@ -26,6 +26,7 @@ class UserOut(BaseModel):
     username: str
     display_name: str
     is_admin: bool = False
+    is_banned: bool = False
     bio: Optional[str] = None
     description: Optional[str] = None
     links: List[str] = Field(default_factory=list)
@@ -79,6 +80,7 @@ class AdminUserUpdate(BaseModel):
     password: Optional[str] = None
     bio: Optional[str] = None
     profile_picture_path: Optional[str] = None
+    is_banned: Optional[bool] = None
 
 
 class TokenResponse(BaseModel):
@@ -115,6 +117,15 @@ class ProjectFileOut(BaseModel):
     id: int
     name: str
     content: str
+    sort_order: int = 0
+
+    model_config = ConfigDict(from_attributes=True)
+
+
+class ProjectFolderOut(BaseModel):
+    id: int
+    path: str
+    sort_order: int = 0
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -147,6 +158,16 @@ class ProjectDuplicateRequest(BaseModel):
     name: Optional[str] = None
 
 
+class ProjectPermissionsOut(BaseModel):
+    is_owner: bool = False
+    is_collaborator: bool = False
+    can_view: bool = False
+    can_edit: bool = False
+    can_manage: bool = False
+    can_share: bool = False
+    can_toggle_visibility: bool = False
+
+
 class ProjectOut(BaseModel):
     id: int
     public_id: str
@@ -159,8 +180,10 @@ class ProjectOut(BaseModel):
     owner_name: Optional[str] = None  # Will be populated by the API
     is_public: bool = False
     files: List[ProjectFileOut] = []
+    folders: List[ProjectFolderOut] = []
     block_documents: List[ProjectBlockDocumentOut] = []
     collaborators: List[ProjectCollaboratorOut] = []
+    permissions: ProjectPermissionsOut = Field(default_factory=ProjectPermissionsOut)
 
     model_config = ConfigDict(from_attributes=True)
 
@@ -209,14 +232,98 @@ class ProjectSnapshotOut(BaseModel):
     model_config = ConfigDict(from_attributes=True)
 
 
+SnapshotFileStatus = Literal["modified", "added", "deleted", "unchanged"]
+
+
+class ProjectSnapshotDiffFileOut(BaseModel):
+    file_name: str
+    status: SnapshotFileStatus
+    current_file_id: Optional[int] = None
+    snapshot_content: str = ""
+    current_content: str = ""
+
+
+class ProjectSnapshotInspectOut(BaseModel):
+    snapshot: ProjectSnapshotOut
+    files: List[ProjectSnapshotDiffFileOut] = Field(default_factory=list)
+    changed_file_count: int = 0
+
+
+class ProjectSnapshotRestoreRequest(BaseModel):
+    file_names: List[str] = Field(default_factory=list)
+    allow_added_file_deletions: bool = False
+    create_safety_snapshot: bool = True
+    safety_snapshot_name: Optional[str] = None
+
+    @field_validator("file_names", mode="before")
+    @classmethod
+    def _normalize_file_names(cls, value):
+        if value is None:
+            return []
+        if not isinstance(value, list):
+            raise ValueError("file_names must be a list")
+
+        cleaned: List[str] = []
+        seen: set[str] = set()
+        for item in value:
+            if not isinstance(item, str):
+                continue
+            name = item.strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            cleaned.append(name)
+        return cleaned
+
+
+class ProjectSnapshotRestoreOut(BaseModel):
+    status: Literal["restored"]
+    snapshot_id: int
+    updated_files: int = 0
+    restore_scope: Literal["full", "partial"] = "full"
+    restored_file_names: List[str] = Field(default_factory=list)
+    safety_snapshot: Optional[ProjectSnapshotOut] = None
+
+
 class FileCreate(BaseModel):
     name: str
     content: Optional[str] = ""
+    folder_path: Optional[str] = None
+    sort_order: Optional[int] = None
 
 
 class FileUpdate(BaseModel):
     name: Optional[str] = None
     content: Optional[str] = None
+    folder_path: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+class ProjectFolderCreate(BaseModel):
+    name: str
+    parent_path: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+class ProjectFolderUpdate(BaseModel):
+    name: Optional[str] = None
+    parent_path: Optional[str] = None
+    sort_order: Optional[int] = None
+
+
+TreeItemKind = Literal["file", "folder"]
+
+
+class ProjectTreeOrderItem(BaseModel):
+    kind: TreeItemKind
+    id: int
+
+
+class ProjectTreeMoveRequest(BaseModel):
+    kind: TreeItemKind
+    id: int
+    target_parent_path: Optional[str] = None
+    ordered_siblings: List[ProjectTreeOrderItem] = Field(default_factory=list)
 
 
 class ProjectBlockDocumentCreate(BaseModel):

@@ -176,3 +176,25 @@ async def test_session_chat_strips_whitespace(monkeypatch):
     await main.session_chat("sid_fay", {"projectId": 3, "message": "  hi there  "})
     assert len(emitted) == 1
     assert emitted[0][1]["message"] == "hi there"
+
+
+@pytest.mark.asyncio
+async def test_session_chat_rejects_banned_session(monkeypatch):
+    emitted = []
+
+    async def fake_emit(event, data, room=None):
+        emitted.append((event, data, room))
+
+    monkeypatch.setattr(main.sio, "emit", fake_emit)
+
+    main._sid_info["sid_banned"] = {
+        "user_id": 7,
+        "is_admin": False,
+        "project_id": 9,
+        "can_edit": False,
+        "is_banned": True,
+        "name": "Banned",
+    }
+
+    await main.session_chat("sid_banned", {"projectId": 9, "message": "should not send"})
+    assert emitted == []
