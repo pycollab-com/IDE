@@ -12,6 +12,7 @@ import OfflineBanner from "./components/OfflineBanner";
 import Layout from "./components/Layout";
 import LoginPage from "./pages/Login";
 import RegisterPage from "./pages/Register";
+import Onboarding from "./pages/Onboarding";
 import Dashboard from "./pages/Dashboard";
 import HostedEditorPage from "./pages/HostedEditor";
 import LocalEditorPage from "./pages/LocalEditor";
@@ -249,6 +250,11 @@ export default function App() {
     const params = new URLSearchParams(location.search);
     const redirect = params.get("redirect");
     const safeRedirect = redirect && redirect.startsWith("/") && !redirect.startsWith("//") ? redirect : "/";
+    if (!redirect && localStorage.getItem("pycollab:onboardingPending") === "1") {
+      localStorage.removeItem("pycollab:onboardingPending");
+      navigate("/onboarding");
+      return;
+    }
     navigate(safeRedirect);
   };
 
@@ -275,6 +281,10 @@ export default function App() {
           <Route
             path="/register"
             element={user?.is_banned ? <BannedPage user={user} /> : <RegisterPage onAuth={handleAuth} theme={theme} toggleTheme={toggleTheme} />}
+          />
+          <Route
+            path="/onboarding"
+            element={<Onboarding user={user} theme={theme} toggleTheme={toggleTheme} />}
           />
           <Route path="/local" element={<Navigate to="/" replace />} />
           <Route

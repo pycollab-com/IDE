@@ -1,10 +1,22 @@
-import { useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AnimatePresence, motion } from "framer-motion";
-import { FiClock, FiRefreshCw, FiX } from "react-icons/fi";
+import {
+  FiChevronDown,
+  FiChevronUp,
+  FiClock,
+  FiColumns,
+  FiCornerUpLeft,
+  FiList,
+  FiRefreshCw,
+  FiSearch,
+  FiX,
+} from "react-icons/fi";
 import {
   buildCheckpointDiffRows,
   CHECKPOINT_FILE_STATUS_LABELS,
   CHECKPOINT_FILE_STATUS_TONES,
+  summarizeDiffRows,
+  toSplitRows,
 } from "../utils/checkpointDiff";
 
 const formatSnapshotTime = (value) => {
@@ -22,6 +34,38 @@ const formatSnapshotTime = (value) => {
   }
 };
 
+const STATUS_GLYPH = { modified: "±", added: "+", deleted: "−", unchanged: "•" };
+
+const Stat = ({ additions, removals }) => {
+  if (!additions && !removals) return <span className="ci-stat-none">no line changes</span>;
+  return (
+    <span className="ci-stat">
+      {additions > 0 && <span className="ci-stat-add">+{additions}</span>}
+      {removals > 0 && <span className="ci-stat-remove">−{removals}</span>}
+    </span>
+  );
+};
+
+// Renders one line of code, highlighting the exact words that changed.
+const LineText = ({ text, segments, emphasis }) => {
+  if (!segments) {
+    return <code className="ci-code">{text === "" ? " " : text}</code>;
+  }
+  return (
+    <code className="ci-code">
+      {segments.map((segment, index) =>
+        segment.changed ? (
+          <mark key={index} className={`ci-word ci-word-${emphasis}`}>
+            {segment.text}
+          </mark>
+        ) : (
+          <span key={index}>{segment.text}</span>
+        )
+      )}
+    </code>
+  );
+};
+
 export default function CheckpointInspectorModal({
   open,
   snapshot,
@@ -37,31 +81,66 @@ export default function CheckpointInspectorModal({
 }) {
   const [activeFileName, setActiveFileName] = useState("");
   const [selectedFileNames, setSelectedFileNames] = useState([]);
+  const [viewMode, setViewMode] = useState("unified");
+  const [showUnchanged, setShowUnchanged] = useState(false);
+  const [fileQuery, setFileQuery] = useState("");
+  const [expandedCollapses, setExpandedCollapses] = useState(() => new Set());
+  const diffScrollRef = useRef(null);
 
   const files = useMemo(() => inspection?.files || [], [inspection?.files]);
 
+  // Per-file +/- line counts, plus a project-wide total for the summary bar.
+  const statsByFile = useMemo(() => {
+    const map = new Map();
+    files.forEach((entry) => {
+      if (entry.status === "unchanged") {
+        map.set(entry.file_name, { additions: 0, removals: 0 });
+        return;
+      }
+      const rows = buildCheckpointDiffRows(entry.snapshot_content, entry.current_content, { intraLine: false });
+      map.set(entry.file_name, summarizeDiffRows(rows));
+    });
+    return map;
+  }, [files]);
+
+  const totals = useMemo(() => {
+    let additions = 0;
+    let removals = 0;
+    statsByFile.forEach((value) => {
+      additions += value.additions;
+      removals += value.removals;
+    });
+    return { additions, removals };
+  }, [statsByFile]);
+
+  const changedFiles = useMemo(() => files.filter((entry) => entry.status !== "unchanged"), [files]);
+  const unchangedCount = files.length - changedFiles.length;
+
+  const visibleFiles = useMemo(() => {
+    const base = showUnchanged ? files : changedFiles;
+    const query = fileQuery.trim().toLowerCase();
+    if (!query) return base;
+    return base.filter((entry) => entry.file_name.toLowerCase().includes(query));
+  }, [files, changedFiles, showUnchanged, fileQuery]);
+
   useEffect(() => {
-    if (!open) {
+    if (!open || !files.length) {
       setSelectedFileNames([]);
       setActiveFileName("");
       return;
     }
-
-    if (!files.length) {
-      setSelectedFileNames([]);
-      setActiveFileName("");
-      return;
-    }
-
     setSelectedFileNames([]);
     const firstChangedFile = files.find((entry) => entry.status !== "unchanged");
     setActiveFileName((current) => {
-      if (current && files.some((entry) => entry.file_name === current)) {
-        return current;
-      }
+      if (current && files.some((entry) => entry.file_name === current)) return current;
       return (firstChangedFile || files[0]).file_name;
     });
   }, [open, snapshot?.id, files]);
+
+  useEffect(() => {
+    setExpandedCollapses(new Set());
+    if (diffScrollRef.current) diffScrollRef.current.scrollTop = 0;
+  }, [activeFileName, viewMode]);
 
   const activeFile = useMemo(
     () => files.find((entry) => entry.file_name === activeFileName) || files[0] || null,
@@ -73,29 +152,49 @@ export default function CheckpointInspectorModal({
     return buildCheckpointDiffRows(activeFile.snapshot_content, activeFile.current_content, { contextLines: 3 });
   }, [activeFile]);
 
-  const changedFiles = useMemo(
-    () => files.filter((entry) => entry.status !== "unchanged"),
-    [files]
-  );
+  const splitRows = useMemo(() => toSplitRows(diffRows), [diffRows]);
+  const activeStats = activeFile ? statsByFile.get(activeFile.file_name) || { additions: 0, removals: 0 } : null;
+  const changeCount = (activeStats?.additions || 0) + (activeStats?.removals || 0);
 
   const selectedFiles = useMemo(
     () => files.filter((entry) => selectedFileNames.includes(entry.file_name)),
     [files, selectedFileNames]
   );
-
   const selectedHasAddedFiles = selectedFiles.some((entry) => entry.status === "added");
 
   const toggleSelectedFile = (fileName) => {
     setSelectedFileNames((current) =>
-      current.includes(fileName)
-        ? current.filter((entry) => entry !== fileName)
-        : [...current, fileName]
+      current.includes(fileName) ? current.filter((entry) => entry !== fileName) : [...current, fileName]
     );
   };
 
-  const selectChangedFiles = () => {
-    setSelectedFileNames(changedFiles.map((entry) => entry.file_name));
+  const toggleCollapse = (key) => {
+    setExpandedCollapses((current) => {
+      const next = new Set(current);
+      if (next.has(key)) next.delete(key);
+      else next.add(key);
+      return next;
+    });
   };
+
+  // Scroll the diff so the next/previous changed block lands near the top.
+  const jumpToChange = useCallback((direction) => {
+    const container = diffScrollRef.current;
+    if (!container) return;
+    const blocks = Array.from(container.querySelectorAll("[data-change-block='true']"));
+    if (!blocks.length) return;
+    const current = container.scrollTop;
+    const tops = blocks.map((node) => node.offsetTop);
+    let target;
+    if (direction > 0) {
+      target = tops.find((top) => top > current + 4);
+      if (target == null) target = tops[0];
+    } else {
+      const before = tops.filter((top) => top < current - 4);
+      target = before.length ? before[before.length - 1] : tops[tops.length - 1];
+    }
+    container.scrollTo({ top: Math.max(0, target - 12), behavior: "smooth" });
+  }, []);
 
   const handleRestoreFull = () => {
     if (!snapshot || restoreBusy) return;
@@ -115,14 +214,90 @@ export default function CheckpointInspectorModal({
       );
       if (!confirmedDeletion) return;
     }
-    onRestoreSelected?.(fileNames, {
-      allowAddedFileDeletions: includesAddedFiles,
-    });
+    onRestoreSelected?.(fileNames, { allowAddedFileDeletions: includesAddedFiles });
   };
 
   const handleRestoreActiveFile = () => {
     if (!activeFile) return;
     handleRestoreSelection([activeFile.file_name], [activeFile]);
+  };
+
+  const renderUnifiedRow = (row, key) => {
+    const emphasis = row.type === "add" ? "add" : "remove";
+    return (
+      <div key={key} className={`ci-row ci-row-${row.type}`} data-change-block={row.type !== "context" || undefined}>
+        <span className="ci-gutter">{row.oldNumber || ""}</span>
+        <span className="ci-gutter">{row.newNumber || ""}</span>
+        <span className="ci-marker">{row.type === "add" ? "+" : row.type === "remove" ? "−" : ""}</span>
+        <LineText text={row.text} segments={row.segments} emphasis={emphasis} />
+      </div>
+    );
+  };
+
+  const renderSplitSide = (side, kind) => {
+    const filled = side != null;
+    return (
+      <>
+        <span className="ci-gutter">{filled ? side.number || "" : ""}</span>
+        <span className={`ci-split-cell ${filled ? "" : "ci-split-empty"}`}>
+          {filled ? <LineText text={side.text} segments={side.segments} emphasis={kind} /> : null}
+        </span>
+      </>
+    );
+  };
+
+  const renderSplitRow = (row, key) => {
+    if (row.type === "context") {
+      return (
+        <div key={key} className="ci-srow ci-srow-context">
+          {renderSplitSide(row.left, "context")}
+          {renderSplitSide(row.right, "context")}
+        </div>
+      );
+    }
+    return (
+      <div key={key} className="ci-srow ci-srow-change" data-change-block="true">
+        <div className={`ci-split-pane ${row.left ? "ci-pane-remove" : "ci-pane-blank"}`}>
+          {renderSplitSide(row.left, "remove")}
+        </div>
+        <div className={`ci-split-pane ${row.right ? "ci-pane-add" : "ci-pane-blank"}`}>
+          {renderSplitSide(row.right, "add")}
+        </div>
+      </div>
+    );
+  };
+
+  const renderCollapse = (row, key) => {
+    const isExpanded = expandedCollapses.has(key);
+    if (isExpanded) {
+      const isSplit = viewMode === "split";
+      return (
+        <div key={key}>
+          <button type="button" className="ci-collapse ci-collapse-open" onClick={() => toggleCollapse(key)}>
+            <FiChevronUp size={13} />
+            Hide {row.count} unchanged {row.count === 1 ? "line" : "lines"}
+          </button>
+          {row.rows.map((hidden, hiddenIndex) =>
+            isSplit
+              ? renderSplitRow(
+                  {
+                    type: "context",
+                    left: { number: hidden.oldNumber, text: hidden.text },
+                    right: { number: hidden.newNumber, text: hidden.text },
+                  },
+                  `${key}-h-${hiddenIndex}`
+                )
+              : renderUnifiedRow(hidden, `${key}-h-${hiddenIndex}`)
+          )}
+        </div>
+      );
+    }
+    return (
+      <button key={key} type="button" className="ci-collapse" onClick={() => toggleCollapse(key)}>
+        <FiChevronDown size={13} />
+        Show {row.count} unchanged {row.count === 1 ? "line" : "lines"}
+      </button>
+    );
   };
 
   return (
@@ -136,216 +311,260 @@ export default function CheckpointInspectorModal({
           onClick={() => !restoreBusy && onClose?.()}
         >
           <motion.div
-            className="panel modal-card checkpoint-inspector-modal"
-            initial={{ opacity: 0, y: 12, scale: 0.98 }}
-            animate={{ opacity: 1, y: 0, scale: 1 }}
-            exit={{ opacity: 0, y: 12, scale: 0.98 }}
-            transition={{ duration: 0.18 }}
+            className="ci-modal"
+            initial={{ opacity: 0, y: 8 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: 8 }}
+            transition={{ duration: 0.16 }}
             onClick={(event) => event.stopPropagation()}
           >
-            <div className="checkpoint-inspector-header">
-              <div>
-                <div className="panel-title">Checkpoint Inspector</div>
-                <div className="checkpoint-inspector-title">{snapshot?.name || "Checkpoint"}</div>
+            <header className="ci-header">
+              <div className="ci-header-main">
+                <div className="ci-eyebrow">Checkpoint diff</div>
+                <h2 className="ci-title">{snapshot?.name || "Checkpoint"}</h2>
+                <div className="ci-meta">
+                  <span className="ci-meta-item">{snapshot?.created_by_name || "Unknown author"}</span>
+                  <span className="ci-meta-dot" />
+                  <span className="ci-meta-item">
+                    <FiClock size={12} />
+                    {formatSnapshotTime(snapshot?.created_at)}
+                  </span>
+                  <span className="ci-meta-dot" />
+                  <span className="ci-meta-item">
+                    <span className="ci-stat-add">+{totals.additions}</span>
+                    <span className="ci-stat-remove">−{totals.removals}</span>
+                    across {changedFiles.length} {changedFiles.length === 1 ? "file" : "files"}
+                  </span>
+                  {!canEdit && <span className="ci-badge-view">View only</span>}
+                </div>
               </div>
-              <div className="checkpoint-inspector-header-actions">
-                <button
-                  className="btn btn-ghost checkpoint-inspector-refresh"
-                  onClick={onRefresh}
-                  disabled={loading || restoreBusy}
-                  title="Refresh checkpoint comparison"
-                >
-                  <FiRefreshCw size={14} />
+              <div className="ci-header-actions">
+                <button className="btn btn-ghost ci-refresh" onClick={onRefresh} disabled={loading || restoreBusy}>
+                  <FiRefreshCw size={14} className={loading ? "ci-spin" : ""} />
                   Refresh
                 </button>
-                <button
-                  className="btn-ghost modal-close"
-                  onClick={() => onClose?.()}
-                  disabled={restoreBusy}
-                  title="Close"
-                >
+                <button className="btn-ghost modal-close" onClick={() => onClose?.()} disabled={restoreBusy} title="Close">
                   <FiX size={18} />
                 </button>
               </div>
-            </div>
+            </header>
 
-            <div className="checkpoint-inspector-meta">
-              <span className="checkpoint-inspector-chip">{snapshot?.created_by_name || "Unknown author"}</span>
-              <span className="checkpoint-inspector-chip">
-                <FiClock size={12} />
-                {formatSnapshotTime(snapshot?.created_at)}
-              </span>
-              <span className="checkpoint-inspector-chip">{inspection?.changed_file_count || 0} changed</span>
-              <span className="checkpoint-inspector-chip">{files.length} total files</span>
-              {!canEdit && <span className="checkpoint-inspector-chip muted">View only</span>}
-            </div>
-
-            {loadError && <div className="checkpoint-inspector-banner error">{loadError}</div>}
+            {loadError && <div className="ci-banner error">{loadError}</div>}
             {!loadError && !canEdit && (
-              <div className="checkpoint-inspector-banner">
+              <div className="ci-banner">
                 You can inspect this checkpoint, but only collaborators with edit access can restore files.
               </div>
             )}
 
-            <div className="checkpoint-inspector-layout">
-              <div className="checkpoint-inspector-sidebar">
-                <div className="checkpoint-inspector-sidebar-header">
-                  <span className="es-section-label">Files</span>
-                  <div className="checkpoint-inspector-sidebar-actions">
-                    {canEdit && (
-                      <>
-                        <button
-                          className="es-task-filter"
-                          onClick={selectChangedFiles}
-                          disabled={!changedFiles.length || restoreBusy || loading}
-                        >
-                          Select changed
-                        </button>
-                        <button
-                          className="es-task-filter"
-                          onClick={() => setSelectedFileNames([])}
-                          disabled={!selectedFileNames.length || restoreBusy}
-                        >
-                          Clear
-                        </button>
-                      </>
-                    )}
-                  </div>
+            <div className="ci-body">
+              <aside className="ci-sidebar">
+                <div className="ci-sidebar-search">
+                  <FiSearch size={14} />
+                  <input
+                    type="text"
+                    value={fileQuery}
+                    onChange={(event) => setFileQuery(event.target.value)}
+                    placeholder="Filter files"
+                    aria-label="Filter files"
+                  />
                 </div>
 
-                <div className="checkpoint-inspector-file-list">
+                <div className="ci-sidebar-toolbar">
+                  <span className="ci-sidebar-count">
+                    {changedFiles.length} changed
+                    {unchangedCount > 0 && (
+                      <button
+                        type="button"
+                        className={`ci-link ${showUnchanged ? "active" : ""}`}
+                        onClick={() => setShowUnchanged((value) => !value)}
+                      >
+                        {showUnchanged ? "Hide" : "Show"} {unchangedCount} unchanged
+                      </button>
+                    )}
+                  </span>
+                  {canEdit && (
+                    <div className="ci-sidebar-select">
+                      <button
+                        type="button"
+                        className="ci-link"
+                        onClick={() => setSelectedFileNames(changedFiles.map((entry) => entry.file_name))}
+                        disabled={!changedFiles.length || restoreBusy || loading}
+                      >
+                        Select all
+                      </button>
+                      <button
+                        type="button"
+                        className="ci-link"
+                        onClick={() => setSelectedFileNames([])}
+                        disabled={!selectedFileNames.length || restoreBusy}
+                      >
+                        Clear
+                      </button>
+                    </div>
+                  )}
+                </div>
+
+                <div className="ci-file-list">
+                  {loading && <div className="ci-empty">Loading checkpoint comparison…</div>}
+                  {!loading && visibleFiles.length === 0 && (
+                    <div className="ci-empty">
+                      {files.length === 0 ? "This checkpoint has no files to inspect." : "No files match this filter."}
+                    </div>
+                  )}
                   {!loading &&
-                    files.map((entry) => {
+                    visibleFiles.map((entry) => {
                       const isActive = activeFile?.file_name === entry.file_name;
                       const isSelected = selectedFileNames.includes(entry.file_name);
                       const tone = CHECKPOINT_FILE_STATUS_TONES[entry.status] || "unchanged";
+                      const stats = statsByFile.get(entry.file_name) || { additions: 0, removals: 0 };
                       return (
-                        <div
-                          key={entry.file_name}
-                          className={`checkpoint-inspector-file ${isActive ? "active" : ""}`}
-                        >
+                        <div key={entry.file_name} className={`ci-file ${isActive ? "active" : ""}`}>
                           {canEdit && (
-                            <label className="checkpoint-inspector-checkbox">
-                              <input
-                                type="checkbox"
-                                aria-label={`Select ${entry.file_name}`}
-                                checked={isSelected}
-                                onChange={() => toggleSelectedFile(entry.file_name)}
-                                disabled={restoreBusy}
-                              />
-                            </label>
+                            <input
+                              type="checkbox"
+                              className="ci-file-check"
+                              aria-label={`Select ${entry.file_name}`}
+                              checked={isSelected}
+                              onChange={() => toggleSelectedFile(entry.file_name)}
+                              disabled={restoreBusy}
+                            />
                           )}
                           <button
-                            className="checkpoint-inspector-file-button"
+                            type="button"
+                            className="ci-file-button"
                             onClick={() => setActiveFileName(entry.file_name)}
+                            title={`${entry.file_name} — ${CHECKPOINT_FILE_STATUS_LABELS[entry.status] || entry.status}`}
                           >
-                            <span className="checkpoint-inspector-file-name">{entry.file_name}</span>
-                            <span className={`checkpoint-inspector-status tone-${tone}`}>
-                              {CHECKPOINT_FILE_STATUS_LABELS[entry.status] || entry.status}
-                            </span>
+                            <span className={`ci-file-glyph tone-${tone}`}>{STATUS_GLYPH[entry.status] || "•"}</span>
+                            <span className="ci-file-name">{entry.file_name}</span>
+                            <Stat additions={stats.additions} removals={stats.removals} />
                           </button>
                         </div>
                       );
                     })}
-                  {!loading && files.length === 0 && (
-                    <div className="checkpoint-inspector-empty">This checkpoint has no files to inspect.</div>
-                  )}
-                  {loading && <div className="checkpoint-inspector-empty">Loading checkpoint comparison...</div>}
                 </div>
-              </div>
+              </aside>
 
-              <div className="checkpoint-inspector-diff">
+              <section className="ci-diff">
                 {activeFile ? (
                   <>
-                    <div className="checkpoint-inspector-diff-header">
-                      <div>
-                        <div className="checkpoint-inspector-diff-path">{activeFile.file_name}</div>
-                        <div className="checkpoint-inspector-diff-subtitle">
-                          {CHECKPOINT_FILE_STATUS_LABELS[activeFile.status] || activeFile.status}
+                    <div className="ci-diff-toolbar">
+                      <div className="ci-diff-file">
+                        <span className={`ci-file-glyph tone-${CHECKPOINT_FILE_STATUS_TONES[activeFile.status] || "unchanged"}`}>
+                          {STATUS_GLYPH[activeFile.status] || "•"}
+                        </span>
+                        <div className="ci-diff-file-text">
+                          <div className="ci-diff-path">{activeFile.file_name}</div>
+                          <div className="ci-diff-sub">
+                            {CHECKPOINT_FILE_STATUS_LABELS[activeFile.status] || activeFile.status}
+                            {activeStats && (activeStats.additions > 0 || activeStats.removals > 0) && (
+                              <>
+                                {" · "}
+                                <Stat additions={activeStats.additions} removals={activeStats.removals} />
+                              </>
+                            )}
+                          </div>
                         </div>
                       </div>
-                      {canEdit && (
-                        <button
-                          className="btn btn-secondary checkpoint-inspector-inline-restore"
-                          onClick={handleRestoreActiveFile}
-                          disabled={restoreBusy}
-                        >
-                          {restoreBusy ? "Restoring..." : "Restore this file"}
-                        </button>
-                      )}
-                    </div>
 
-                    <div className="checkpoint-inspector-diff-legend">
-                      Comparing checkpoint content on the left against the current project state on the right.
-                    </div>
-
-                    <div className="checkpoint-inspector-diff-rows">
-                      {diffRows.length === 0 && (
-                        <div className="checkpoint-inspector-empty">No content differences in this file.</div>
-                      )}
-                      {diffRows.map((row, index) => {
-                        if (row.type === "collapsed") {
-                          return (
-                            <div key={`collapsed-${index}`} className="checkpoint-inspector-diff-row collapsed">
-                              <span className="checkpoint-inspector-diff-collapse">
-                                {row.count} unchanged lines hidden
-                              </span>
-                            </div>
-                          );
-                        }
-
-                        return (
-                          <div
-                            key={`${row.type}-${row.oldNumber || "n"}-${row.newNumber || "n"}-${index}`}
-                            className={`checkpoint-inspector-diff-row type-${row.type}`}
-                          >
-                            <span className="checkpoint-inspector-line-number">{row.oldNumber || ""}</span>
-                            <span className="checkpoint-inspector-line-number">{row.newNumber || ""}</span>
-                            <span className="checkpoint-inspector-line-marker">
-                              {row.type === "add" ? "+" : row.type === "remove" ? "-" : " "}
-                            </span>
-                            <code className="checkpoint-inspector-line-text">{row.text}</code>
+                      <div className="ci-diff-controls">
+                        {changeCount > 0 && (
+                          <div className="ci-nav">
+                            <button type="button" title="Previous change" onClick={() => jumpToChange(-1)}>
+                              <FiChevronUp size={15} />
+                            </button>
+                            <button type="button" title="Next change" onClick={() => jumpToChange(1)}>
+                              <FiChevronDown size={15} />
+                            </button>
                           </div>
-                        );
-                      })}
+                        )}
+                        <div className="ci-toggle" role="group" aria-label="Diff view mode">
+                          <button
+                            type="button"
+                            className={viewMode === "unified" ? "active" : ""}
+                            onClick={() => setViewMode("unified")}
+                            title="Unified view"
+                          >
+                            <FiList size={14} /> Unified
+                          </button>
+                          <button
+                            type="button"
+                            className={viewMode === "split" ? "active" : ""}
+                            onClick={() => setViewMode("split")}
+                            title="Side-by-side view"
+                          >
+                            <FiColumns size={14} /> Split
+                          </button>
+                        </div>
+                        {canEdit && (
+                          <button
+                            type="button"
+                            className="btn btn-secondary ci-restore-file"
+                            onClick={handleRestoreActiveFile}
+                            disabled={restoreBusy}
+                          >
+                            <FiCornerUpLeft size={14} />
+                            {restoreBusy ? "Restoring…" : "Restore file"}
+                          </button>
+                        )}
+                      </div>
+                    </div>
+
+                    {viewMode === "split" && (
+                      <div className="ci-split-head">
+                        <span>Checkpoint</span>
+                        <span>Current</span>
+                      </div>
+                    )}
+
+                    <div className={`ci-diff-scroll ${viewMode === "split" ? "is-split" : ""}`} ref={diffScrollRef}>
+                      {diffRows.length === 0 ? (
+                        <div className="ci-empty">No content differences in this file.</div>
+                      ) : viewMode === "split" ? (
+                        splitRows.map((row, index) =>
+                          row.type === "collapsed"
+                            ? renderCollapse(row, `${activeFileName}|c|${index}`)
+                            : renderSplitRow(row, `s-${index}`)
+                        )
+                      ) : (
+                        diffRows.map((row, index) =>
+                          row.type === "collapsed"
+                            ? renderCollapse(row, `${activeFileName}|c|${index}`)
+                            : renderUnifiedRow(row, `u-${index}`)
+                        )
+                      )}
                     </div>
                   </>
                 ) : (
-                  <div className="checkpoint-inspector-empty">Select a file to preview its diff.</div>
+                  <div className="ci-empty">Select a file to preview its diff.</div>
                 )}
-              </div>
+              </section>
             </div>
 
-            <div className="checkpoint-inspector-footer">
-              <div className="checkpoint-inspector-footer-copy">
+            <footer className="ci-footer">
+              <div className="ci-footer-copy">
                 {selectedFileNames.length > 0
-                  ? `${selectedFileNames.length} file${selectedFileNames.length === 1 ? "" : "s"} selected`
-                  : "Select one or more files to restore only those files."}
+                  ? `${selectedFileNames.length} file${selectedFileNames.length === 1 ? "" : "s"} selected for restore`
+                  : "Tick files in the list to restore only those, or restore the whole checkpoint."}
                 {selectedHasAddedFiles && (
-                  <span className="checkpoint-inspector-footer-warning">
-                    Selected added files will be deleted from the current project.
-                  </span>
+                  <span className="ci-footer-warning">Selected files added after this checkpoint will be deleted.</span>
                 )}
               </div>
               {canEdit && (
-                <div className="checkpoint-inspector-footer-actions">
+                <div className="ci-footer-actions">
                   <button
                     className="btn btn-secondary"
                     onClick={() => handleRestoreSelection(selectedFileNames, selectedFiles)}
                     disabled={!selectedFileNames.length || restoreBusy}
                   >
-                    {restoreBusy ? "Restoring..." : "Restore selected files"}
+                    {restoreBusy ? "Restoring…" : "Restore selected"}
                   </button>
-                  <button
-                    className="btn btn-primary"
-                    onClick={handleRestoreFull}
-                    disabled={loading || restoreBusy}
-                  >
-                    {restoreBusy ? "Restoring..." : "Restore full checkpoint"}
+                  <button className="btn btn-primary" onClick={handleRestoreFull} disabled={loading || restoreBusy}>
+                    {restoreBusy ? "Restoring…" : "Restore full checkpoint"}
                   </button>
                 </div>
               )}
-            </div>
+            </footer>
           </motion.div>
         </motion.div>
       )}

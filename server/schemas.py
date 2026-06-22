@@ -81,6 +81,23 @@ class AdminUserUpdate(BaseModel):
     bio: Optional[str] = None
     profile_picture_path: Optional[str] = None
     is_banned: Optional[bool] = None
+    is_admin: Optional[bool] = None
+
+
+class AdminStatsOut(BaseModel):
+    total_users: int = 0
+    admins: int = 0
+    banned_users: int = 0
+    online_users: int = 0
+    new_users_7d: int = 0
+    total_projects: int = 0
+    public_projects: int = 0
+    pybricks_projects: int = 0
+    new_projects_7d: int = 0
+    total_files: int = 0
+    total_conversations: int = 0
+    total_messages: int = 0
+    total_follows: int = 0
 
 
 class TokenResponse(BaseModel):

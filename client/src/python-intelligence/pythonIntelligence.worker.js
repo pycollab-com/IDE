@@ -205,10 +205,19 @@ def _map_signature(signature: Signature) -> dict:
     for parameter in signature.params:
         label = parameter.to_string()
         normalized_name = label.split(":", 1)[0].split("=", 1)[0].strip().lstrip("*")
+        # The real calling convention (POSITIONAL_ONLY / VAR_POSITIONAL / ...),
+        # the source of truth for whether an argument may be passed by keyword.
+        # The slash marker is not reliably present in the params list. Jedi
+        # exposes this as the ParamName.kind property (an inspect.Parameter kind).
+        try:
+            kind = parameter.kind.name
+        except Exception:
+            kind = ""
         mapped_parameters.append(
             {
                 "name": normalized_name,
                 "label": label,
+                "kind": kind,
                 "documentation": parameter_docs.get(normalized_name, ""),
             }
         )
@@ -495,29 +504,45 @@ async function discoverImports(files) {
     const raw = await pyodide.runPythonAsync(`
 import ast
 import json
+import re
 import sys
 
 files = json.loads(__pycollab_intelligence_files_json)
 stdlib = set(getattr(sys, "stdlib_module_names", []))
 imports = set()
 
+# A file being typed almost always has a syntax error somewhere (a trailing
+# 'numpy.', a half-written line). ast.parse would then yield nothing, so the
+# packages that file imports would never get installed. This line regex runs
+# as a fallback so a half-written file still advertises its dependencies.
+import_re = re.compile(r"^[ \\t]*(?:import[ \\t]+([\\w.]+)|from[ \\t]+([\\w.]+)[ \\t]+import)", re.M)
+
 for item in files:
     source = item.get("content") or ""
     filename = item.get("name") or "<file>"
-    try:
-        tree = ast.parse(source, filename=filename)
-    except SyntaxError:
-        continue
 
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            for alias in node.names:
-                root = (alias.name or "").split(".", 1)[0]
+    parsed = None
+    try:
+        parsed = ast.parse(source, filename=filename)
+    except SyntaxError:
+        parsed = None
+
+    if parsed is not None:
+        for node in ast.walk(parsed):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    root = (alias.name or "").split(".", 1)[0]
+                    if root:
+                        imports.add(root)
+            elif isinstance(node, ast.ImportFrom):
+                module = node.module or ""
+                root = module.split(".", 1)[0] if module else ""
                 if root:
                     imports.add(root)
-        elif isinstance(node, ast.ImportFrom):
-            module = node.module or ""
-            root = module.split(".", 1)[0] if module else ""
+    else:
+        for match in import_re.finditer(source):
+            module = match.group(1) or match.group(2) or ""
+            root = module.split(".", 1)[0]
             if root:
                 imports.add(root)
 

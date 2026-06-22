@@ -105,11 +105,13 @@ export default function RegisterPage({ onAuth, theme, toggleTheme }) {
         });
         clearGoogleSignupPayload();
         setGoogleSignup(null);
+        localStorage.setItem("pycollab:onboardingPending", "1");
         setTimeout(() => onAuth(res.data), 500);
         return;
       }
 
       const res = await api.post("/auth/register", { username, password, display_name: displayName || username });
+      localStorage.setItem("pycollab:onboardingPending", "1");
       setTimeout(() => onAuth(res.data), 500);
     } catch (err) {
       const detail = err.response?.data?.detail || "Registration failed";

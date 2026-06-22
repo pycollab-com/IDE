@@ -112,6 +112,79 @@ def _seed_user_graph(db, target: models.User, other: models.User):
     db.commit()
 
 
+def test_admin_stats_returns_aggregate_counts(client, db):
+    admin = _create_user(db, "admin", is_admin=True)
+    target = _create_user(db, "target")
+    other = _create_user(db, "other")
+    _seed_user_graph(db, target, other)
+
+    res = client.get("/admin/api/stats", headers=_auth_header(admin.id))
+    assert res.status_code == 200
+    body = res.json()
+    assert body["total_users"] == 3
+    assert body["admins"] == 1
+    assert body["total_projects"] == 2
+    assert body["total_files"] == 1
+    assert body["total_follows"] == 2
+    assert body["total_conversations"] == 1
+    assert body["total_messages"] == 1
+    assert body["online_users"] == 1
+
+
+def test_admin_stats_requires_admin(client, db):
+    member = _create_user(db, "member")
+    res = client.get("/admin/api/stats", headers=_auth_header(member.id))
+    assert res.status_code == 403
+
+
+def test_admin_can_promote_and_demote_members(client, db):
+    admin = _create_user(db, "admin", is_admin=True)
+    target = _create_user(db, "target")
+
+    promote = client.patch(
+        f"/admin/api/users/{target.id}",
+        headers=_auth_header(admin.id),
+        json={"is_admin": True},
+    )
+    assert promote.status_code == 200
+    assert promote.json()["is_admin"] is True
+    db.refresh(target)
+    assert target.is_admin is True
+
+    demote = client.patch(
+        f"/admin/api/users/{target.id}",
+        headers=_auth_header(admin.id),
+        json={"is_admin": False},
+    )
+    assert demote.status_code == 200
+    assert demote.json()["is_admin"] is False
+
+
+def test_admin_cannot_change_own_admin_status(client, db):
+    admin = _create_user(db, "admin", is_admin=True)
+    res = client.patch(
+        f"/admin/api/users/{admin.id}",
+        headers=_auth_header(admin.id),
+        json={"is_admin": False},
+    )
+    assert res.status_code == 400
+    db.refresh(admin)
+    assert admin.is_admin is True
+
+
+def test_admin_cannot_demote_protected_account(client, db):
+    admin = _create_user(db, "admin", is_admin=True)
+    protected = _create_user(db, "adam", is_admin=True)
+    res = client.patch(
+        f"/admin/api/users/{protected.id}",
+        headers=_auth_header(admin.id),
+        json={"is_admin": False},
+    )
+    assert res.status_code == 400
+    db.refresh(protected)
+    assert protected.is_admin is True
+
+
 def test_admin_force_follow_and_force_project(client, db):
     admin = _create_user(db, "admin", is_admin=True)
     follower = _create_user(db, "follower")
