@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import CodeMirror, { ExternalChange } from "@uiw/react-codemirror";
 import { python } from "@codemirror/lang-python";
@@ -10,17 +10,41 @@ import { getToken } from "../auth";
 import { freezeSerializable } from "../session";
 import PyodideRunner from "../runtime/pyodideRunner";
 import PybricksRunner from "../runtime/pybricksRunner";
+import { createPybricksLiveControlSource } from "../runtime/pybricksLiveControl";
 import PybricksBlocksEditor from "../pybricks-blocks/ui/PybricksBlocksEditor";
 import { motion, AnimatePresence } from "framer-motion";
 import { FiFile, FiFilePlus, FiFolder, FiFolderPlus, FiUsers, FiShare2, FiLogOut, FiPlay, FiTerminal, FiChevronLeft, FiChevronDown, FiChevronRight, FiEdit2, FiTrash2, FiCopy, FiCheck, FiAlertCircle, FiSearch, FiMenu, FiHome, FiEye, FiEyeOff, FiX, FiSquare, FiMessageSquare, FiSend, FiCode, FiPlus, FiActivity, FiClock, FiZap, FiPhoneCall, FiPhoneOff, FiMic, FiMicOff, FiVolume2, FiRefreshCw, FiWifi, FiWifiOff, FiDownload, FiMoreVertical } from "react-icons/fi";
 import CommandPalette from "../components/CommandPalette";
 import ProjectSearch from "../components/ProjectSearch";
 import CheckpointInspectorModal from "../components/CheckpointInspectorModal";
+import PybricksLiveControl from "../components/PybricksLiveControl";
+import HubInfoPanel from "../components/HubInfoPanel";
+import { getPrimaryReading } from "../runtime/pybricksReadings";
 import { usePythonIntelligence } from "../python-intelligence/usePythonIntelligence";
 import { PROJECT_TYPE_PYBRICKS, isPybricksProject as projectUsesPybricks } from "../projects/projectTypes";
 import { copyText } from "../utils/clipboard";
 import { resolveHostedAssetUrl } from "../utils/hostedAssets";
 
+
+// Subsequence fuzzy match for the Cmd/Ctrl+K file switcher.
+// Returns a score (higher is better) or -1 when the query is not a subsequence.
+const fuzzyFileScore = (text, query) => {
+  if (!query) return 0;
+  const haystack = text.toLowerCase();
+  const needle = query.toLowerCase();
+  let cursor = 0;
+  let score = 0;
+  let prevMatch = -2;
+  for (const char of needle) {
+    const found = haystack.indexOf(char, cursor);
+    if (found === -1) return -1;
+    score += found === prevMatch + 1 ? 4 : 1; // reward consecutive matches
+    if (found === 0 || /[\/_\-. ]/.test(haystack[found - 1])) score += 6; // reward word boundaries
+    prevMatch = found;
+    cursor = found + 1;
+  }
+  return score - haystack.length * 0.01; // gently prefer shorter names
+};
 
 // StateEffect + StateField to paint remote cursors/selections
 const setRemoteCursors = StateEffect.define();
@@ -240,6 +264,35 @@ const normalizeTerminalText = (value, fallback = "") => {
     return String(value);
   }
 };
+
+const createEmptyPybricksHubState = () => ({
+  connected: false,
+  status: "disconnected",
+  transport: null,
+  transportLabel: "",
+  deviceName: "",
+  hubType: "",
+  firmwareVersion: "",
+  protocolVersion: "",
+  maxWriteSize: 0,
+  maxUserProgramSize: 0,
+  featureFlags: 0,
+  numOfSlots: 0,
+  selectedSlot: 0,
+  hubRunning: false,
+  batteryState: "unknown",
+  batteryVoltage: null,
+  batteryPercent: null,
+  ports: [],
+  motion: null,
+  buttons: [],
+  telemetryAvailable: false,
+  telemetryError: "",
+  statusFlags: 0,
+  warnings: [],
+});
+
+const formatPortReading = (port) => getPrimaryReading(port);
 
 const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
 
@@ -486,24 +539,17 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const [activityFeed, setActivityFeed] = useState([]);
   const [error, setError] = useState("");
   const [running, setRunning] = useState(false);
+  const [liveControlActive, setLiveControlActive] = useState(false);
   const [stdinLine, setStdinLine] = useState("");
   const [runtimeReady, setRuntimeReady] = useState(false);
-  const [pybricksHubState, setPybricksHubState] = useState({
-    connected: false,
-    status: "disconnected",
-    transport: null,
-    transportLabel: "",
-    deviceName: "",
-    maxWriteSize: 0,
-    maxUserProgramSize: 0,
-    numOfSlots: 0,
-    selectedSlot: 0,
-    hubRunning: false,
-  });
+  const [pybricksHubState, setPybricksHubState] = useState(createEmptyPybricksHubState);
   const [remoteHubSession, setRemoteHubSession] = useState(null);
   const [remoteHubPendingRequests, setRemoteHubPendingRequests] = useState([]);
   const [remoteHubNotice, setRemoteHubNotice] = useState("");
   const [pybricksConnectModalOpen, setPybricksConnectModalOpen] = useState(false);
+  const [hubInfoOpen, setHubInfoOpen] = useState(false);
+  const hubInfoTriggerRef = useRef(null);
+  const [hubInfoPopoverStyle, setHubInfoPopoverStyle] = useState(null);
   const [awaitingInput, setAwaitingInput] = useState(false);
   const [inputPrompt, setInputPrompt] = useState("");
   const [sidebarOpen, setSidebarOpen] = useState(() =>
@@ -564,21 +610,11 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const terminalBodyRef = useRef(null);
   const stdinInputRef = useRef(null);
   const runningRef = useRef(false);
+  const liveControlActiveRef = useRef(false);
   const outputRef = useRef("");
   const runMetaRef = useRef({ runId: null, startedAt: 0, fileName: "", capture: null });
   const runtimeEverReadyRef = useRef(false);
-  const pybricksHubStateRef = useRef({
-    connected: false,
-    status: "disconnected",
-    transport: null,
-    transportLabel: "",
-    deviceName: "",
-    maxWriteSize: 0,
-    maxUserProgramSize: 0,
-    numOfSlots: 0,
-    selectedSlot: 0,
-    hubRunning: false,
-  });
+  const pybricksHubStateRef = useRef(createEmptyPybricksHubState());
 
   useEffect(() => {
     if (typeof window === "undefined") return;
@@ -665,6 +701,10 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   useEffect(() => {
     runningRef.current = running;
   }, [running]);
+
+  useEffect(() => {
+    liveControlActiveRef.current = liveControlActive;
+  }, [liveControlActive]);
 
   useEffect(() => {
     pybricksHubStateRef.current = pybricksHubState;
@@ -1313,6 +1353,59 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       ? Boolean(remoteHubHost)
       : pybricksHubState.connected
     : runtimeReady;
+  const visibleHubInfo = isRemoteHubGuestMode ? remoteHubHost : pybricksHubState;
+  const visibleHubConnected = isRemoteHubGuestMode ? Boolean(remoteHubHost) : pybricksHubState.connected;
+  const visibleHubPorts = Array.isArray(visibleHubInfo?.ports) ? visibleHubInfo.ports : [];
+  const visibleTelemetryAvailable = Boolean(visibleHubInfo?.telemetryAvailable);
+  const visibleActivePorts = visibleTelemetryAvailable
+    ? visibleHubPorts.filter((port) => port?.kind && port.kind !== "empty")
+    : [];
+  const visibleHubTitle = visibleTelemetryAvailable
+    ? [
+        Number.isFinite(visibleHubInfo?.batteryPercent)
+          ? `${visibleHubInfo.batteryPercent}% battery (estimated from voltage)`
+          : "",
+        Number.isFinite(visibleHubInfo?.batteryVoltage)
+          ? `${(visibleHubInfo.batteryVoltage / 1000).toFixed(2)} V`
+          : "",
+        ...visibleActivePorts.map((port) => `${port.port}: ${port.device || "Device"} ${formatPortReading(port)}`),
+      ]
+        .filter(Boolean)
+        .join(" · ")
+    : visibleHubInfo?.telemetryError
+      ? visibleHubInfo.telemetryError
+      : visibleHubInfo?.hubRunning
+        ? "Live hub readings pause while your program is running"
+        : "Reading connected ports";
+
+  useEffect(() => {
+    if (!visibleHubConnected) setHubInfoOpen(false);
+  }, [visibleHubConnected]);
+
+  // The popover is fixed-positioned so it escapes the editor's overflow:hidden
+  // clipping; anchor it under the trigger's right edge from the live rect.
+  useLayoutEffect(() => {
+    if (!hubInfoOpen) {
+      setHubInfoPopoverStyle(null);
+      return undefined;
+    }
+    const reposition = () => {
+      const trigger = hubInfoTriggerRef.current;
+      if (!trigger) return;
+      const rect = trigger.getBoundingClientRect();
+      setHubInfoPopoverStyle({
+        top: rect.bottom + 8,
+        right: Math.max(12, window.innerWidth - rect.right),
+      });
+    };
+    reposition();
+    window.addEventListener("resize", reposition);
+    window.addEventListener("scroll", reposition, true);
+    return () => {
+      window.removeEventListener("resize", reposition);
+      window.removeEventListener("scroll", reposition, true);
+    };
+  }, [hubInfoOpen]);
 
   const [ghostMode, setGhostMode] = useState(false);
   const [canEdit, setCanEdit] = useState(false);
@@ -1484,18 +1577,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     setRemoteHubSession(null);
     setRemoteHubPendingRequests([]);
     setRemoteHubNotice("");
-    setPybricksHubState({
-      connected: false,
-      status: "disconnected",
-      transport: null,
-      transportLabel: "",
-      deviceName: "",
-      maxWriteSize: 0,
-      maxUserProgramSize: 0,
-      numOfSlots: 0,
-      selectedSlot: 0,
-      hubRunning: false,
-    });
+    setPybricksHubState(createEmptyPybricksHubState());
     setPybricksConnectModalOpen(false);
     setCheckpointInspectorSnapshot(null);
     setCheckpointInspection(null);
@@ -2181,6 +2263,10 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     setRunHistory((prev) => [historyEntry, ...prev].slice(0, RUN_HISTORY_LIMIT));
     setActiveRunReplayId(null);
     runMetaRef.current = { runId: null, startedAt: 0, fileName: "", capture: null };
+    if (liveControlActiveRef.current) {
+      liveControlActiveRef.current = false;
+      setLiveControlActive(false);
+    }
   };
 
   const setRunState = (state) => {
@@ -2190,6 +2276,10 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     if (!nextRunning) {
       setAwaitingInput(false);
       setInputPrompt("");
+      if (liveControlActiveRef.current) {
+        liveControlActiveRef.current = false;
+        setLiveControlActive(false);
+      }
     }
   };
 
@@ -2207,9 +2297,24 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       projectId: activeSocketProjectId,
       connected: Boolean(nextState?.connected),
       deviceName: nextState?.deviceName || "",
+      hubType: nextState?.hubType || "",
+      firmwareVersion: nextState?.firmwareVersion || "",
+      protocolVersion: nextState?.protocolVersion || "",
       transport: nextState?.transport || "",
       transportLabel: nextState?.transportLabel || "",
       hubRunning: Boolean(nextState?.hubRunning),
+      batteryState: nextState?.batteryState || "unknown",
+      batteryVoltage: Number.isFinite(nextState?.batteryVoltage) ? nextState.batteryVoltage : null,
+      batteryPercent: Number.isFinite(nextState?.batteryPercent) ? nextState.batteryPercent : null,
+      ports: Array.isArray(nextState?.ports) ? nextState.ports : [],
+      motion: nextState?.motion || null,
+      buttons: Array.isArray(nextState?.buttons) ? nextState.buttons : [],
+      telemetryAvailable: Boolean(nextState?.telemetryAvailable),
+      telemetryError: nextState?.telemetryError || "",
+      maxUserProgramSize: Number(nextState?.maxUserProgramSize) || 0,
+      numOfSlots: Number(nextState?.numOfSlots) || 0,
+      selectedSlot: Number(nextState?.selectedSlot) || 0,
+      warnings: Array.isArray(nextState?.warnings) ? nextState.warnings : [],
     });
   };
 
@@ -2248,23 +2353,16 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     let active = true;
     setRuntimeReady(false);
     runtimeEverReadyRef.current = false;
-    setPybricksHubState({
-      connected: false,
-      status: "disconnected",
-      transport: null,
-      transportLabel: "",
-      deviceName: "",
-      maxWriteSize: 0,
-      maxUserProgramSize: 0,
-      numOfSlots: 0,
-      selectedSlot: 0,
-      hubRunning: false,
-    });
+    setPybricksHubState(createEmptyPybricksHubState());
 
     const runner = project.project_type === PROJECT_TYPE_PYBRICKS ? new PybricksRunner({
       onConnectionChange: (state) => {
         if (!active) return;
         setPybricksHubState(state);
+        if (!state.connected && liveControlActiveRef.current) {
+          liveControlActiveRef.current = false;
+          setLiveControlActive(false);
+        }
         publishRemoteHubHostState(state);
       },
       onReady: () => {
@@ -2351,6 +2449,8 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       runtimeEverReadyRef.current = false;
       setRunning(false);
       runningRef.current = false;
+      setLiveControlActive(false);
+      liveControlActiveRef.current = false;
       setAwaitingInput(false);
       setInputPrompt("");
     };
@@ -3005,6 +3105,68 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     });
   };
 
+  const startLiveControl = async (config) => {
+    const runner = runnerRef.current;
+    if (!runner || !runtimeReady || !pybricksHubStateRef.current.connected) {
+      throw new Error("Connect a PyBricks hub before starting live control.");
+    }
+    if (runningRef.current) {
+      throw new Error("Stop the current program before starting live control.");
+    }
+
+    const source = createPybricksLiveControlSource(config);
+    beginRunCapture("WASD live control");
+    liveControlActiveRef.current = true;
+    setTerminalOpen(true);
+    appendCompilerOutput("[drive] Building live WASD controller...\n");
+
+    try {
+      await runner.run({
+        files: [],
+        entryFileId: -1,
+        entryFileName: "__pycollab_drive__.py",
+        entryFileContent: source,
+      });
+      runMetaRef.current = {
+        ...runMetaRef.current,
+        runId: runner.currentRunId || null,
+      };
+      setRunning(true);
+      runningRef.current = true;
+      setLiveControlActive(true);
+    } catch (error) {
+      liveControlActiveRef.current = false;
+      setLiveControlActive(false);
+      setRunning(false);
+      runningRef.current = false;
+      runMetaRef.current = { runId: null, startedAt: 0, fileName: "", capture: null };
+      throw error;
+    }
+  };
+
+  const sendLiveControlCommand = useCallback((command) => {
+    if (!liveControlActiveRef.current) return false;
+    return runnerRef.current?.sendStdin(command) || false;
+  }, []);
+
+  const sendHubAction = useCallback((command) => runnerRef.current?.sendHubAction(command) || false, []);
+
+  const stopLiveControl = useCallback(async () => {
+    const runner = runnerRef.current;
+    if (!runner || !liveControlActiveRef.current) return;
+    try {
+      await runner.sendStdinAsync("x");
+    } catch {
+      // The transport may already be gone; still ask the runner to stop.
+    }
+    try {
+      await runner.stop();
+    } catch (err) {
+      const stopError = normalizeTerminalText(err?.message, "Failed to stop live control.");
+      appendCompilerOutput(`[drive] ${stopError}\n`);
+    }
+  }, []);
+
   const connectPybricksHub = async (transport) => {
     const runner = runnerRef.current;
     if (!runner || !isPybricksProject || !canConnectLocalPybricksHub) return;
@@ -3579,264 +3741,32 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const doneTaskCount = Math.max(0, tasks.length - openTaskCount);
   const voiceParticipantCount = voiceParticipants.length;
   const commandPaletteItems = useMemo(() => {
-    const query = commandPaletteQuery.trim().toLowerCase();
-    const compact = (value, max = 44) => (value.length > max ? `${value.slice(0, max - 1)}…` : value);
-    const matches = (value = "") => !query || value.toLowerCase().includes(query);
-
-    const commandItems = [
-      ...(!isViewerMode
-        ? [
-            {
-              key: "cmd-files",
-              title: "Open files and project tools",
-              subtitle: "Show files, collaborators, tasks, checkpoints, export, and sharing",
-              badge: "Workspace",
-              icon: <FiMenu size={14} />,
-              onSelect: () => {
-                setActiveSidebarScreen("");
-                setCreateFileMenuOpen(false);
-                setSidebarOpen(true);
-              },
-            },
-          ]
-        : []),
-      {
-        key: "cmd-run",
-        title: "Run current file",
-        subtitle: currentFile?.name ? `Execute ${currentFile.name}` : "Execute active file in browser runtime",
-        badge: "Action",
-        icon: <FiPlay size={14} />,
-        onSelect: () => runCode(),
-      },
-      {
-        key: "cmd-stop",
-        title: "Stop current run",
-        subtitle: "Interrupt active execution",
-        badge: running ? "Running" : "Idle",
-        icon: <FiSquare size={14} />,
-        onSelect: () => stopCode(),
-      },
-      {
-        key: "cmd-terminal",
-        title: terminalOpen ? "Hide terminal" : "Show terminal",
-        subtitle: "Toggle terminal panel visibility",
-        badge: "View",
-        icon: <FiTerminal size={14} />,
-        onSelect: () => setTerminalOpen((prev) => !prev),
-      },
-      ...(!isViewerMode
-        ? [
-            {
-              key: "cmd-chat",
-              title: sessionChatOpen ? "Hide session chat" : "Open session chat",
-              subtitle: "Talk with collaborators in this editing session",
-              badge: "Team",
-              icon: <FiMessageSquare size={14} />,
-              onSelect: () => setSessionChatOpen((prev) => !prev),
-            },
-          ]
-        : []),
-      {
-        key: "cmd-run-history",
-        title: runHistoryOpen ? "Hide run timeline" : "Show run timeline",
-        subtitle: "Toggle recent run replay panel",
-        badge: runHistory.length ? `${runHistory.length} runs` : "No runs",
-        icon: <FiActivity size={14} />,
-        onSelect: () => {
-          setTerminalOpen(true);
-          setRunHistoryOpen((prev) => !prev);
-        },
-      },
-      {
-        key: "cmd-clear-terminal",
-        title: "Clear terminal output",
-        subtitle: "Reset current terminal panel text",
-        badge: "Action",
-        icon: <FiTrash2 size={14} />,
-        onSelect: () => clearTerminal(),
-      },
-      ...(isBlockEditorActive
-        ? [
-            {
-              key: "cmd-generated-code",
-              title: showGeneratedBlockCode ? "Hide generated Python" : "View generated Python",
-              subtitle: "Toggle the Python generated by the block workspace",
-              badge: "Blocks",
-              icon: <FiCode size={14} />,
-              onSelect: () => setShowGeneratedBlockCode((prev) => !prev),
-            },
-          ]
-        : []),
-      ...(isPybricksProject && !isViewerMode && canConnectLocalPybricksHub
-        ? [
-            {
-              key: "cmd-pybricks-hub",
-              title: pybricksHubState.connected ? "Disconnect PyBricks hub" : "Connect PyBricks hub",
-              subtitle: pybricksHubState.connected
-                ? `${pybricksHubState.transportLabel || "Hub"} is connected`
-                : runtimeReady
-                  ? "Choose Bluetooth or wired transport"
-                  : "Compiler is still loading",
-              badge: pybricksHubState.connected ? "Connected" : "Hub",
-              icon: pybricksHubState.connected ? <FiWifi size={14} /> : <FiWifiOff size={14} />,
-              onSelect: () => {
-                if (pybricksConnectionBusy || !runtimeReady) return;
-                if (pybricksHubState.connected) {
-                  disconnectPybricksHub();
-                  return;
-                }
-                setPybricksConnectModalOpen(true);
-              },
-            },
-          ]
-        : []),
-      ...(canEdit
-        ? [
-            {
-              key: "cmd-voice-call",
-              title: voiceEnabled ? "Leave voice call" : "Join voice call",
-              subtitle: voiceEnabled ? "Disconnect from the collaborator voice room" : "Start voice with collaborators",
-              badge: voiceParticipantCount ? `${voiceParticipantCount} in call` : "Voice",
-              icon: voiceEnabled ? <FiPhoneOff size={14} /> : <FiPhoneCall size={14} />,
-              onSelect: () => {
-                if (voiceJoining) return;
-                voiceEnabled ? leaveVoiceCall() : joinVoiceCall();
-              },
-            },
-            ...(voiceEnabled
-              ? [
-                  {
-                    key: "cmd-voice-panel",
-                    title: voicePanelOpen ? "Hide call controls" : "Show call controls",
-                    subtitle: "Open mute and participant controls",
-                    badge: "Voice",
-                    icon: <FiUsers size={14} />,
-                    onSelect: () => setVoicePanelOpen((prev) => !prev),
-                  },
-                ]
-              : []),
-          ]
-        : []),
-      {
-        key: "cmd-dashboard",
-        title: "Back to dashboard",
-        subtitle: "Return to project list",
-        badge: "Navigate",
-        icon: <FiHome size={14} />,
-        onSelect: () => navigate("/"),
-      },
-      ...(canEdit
-        ? [
-            {
-              key: "cmd-new-file",
-              title: "Create new file",
-              subtitle: isPybricksProject ? "Choose text or block, then name it" : "Create a new text file",
-              badge: "Edit",
-              icon: <FiFilePlus size={14} />,
-              onSelect: () => openCreateFileMenu(),
-            },
-            {
-              key: "cmd-checkpoint",
-              title: "Create checkpoint",
-              subtitle: "Save a new restore point",
-              badge: "Edit",
-              icon: <FiCopy size={14} />,
-              onSelect: () => createSnapshot(),
-            },
-          ]
-        : []),
-    ]
-      .filter((item) => matches(`${item.title} ${item.subtitle} ${item.badge || ""}`))
-      .slice(0, 14);
-
-    const fileItems = flattenedEditorEntries
-      .filter((entry) => matches(entry.fullName || entry.name))
-      .slice(0, 14)
-      .map((entry) => ({
-        key: entry.key,
-        title: `Open ${entry.kind === "blocks" ? "block file" : "file"}: ${entry.fullName || entry.name}`,
-        subtitle:
-          entry.kind === "blocks"
-            ? isBlockFileActive(entry.id)
-              ? "Currently open"
-              : "Switch block workspace"
-            : isTextFileActive(entry.id)
-              ? "Currently open"
-              : "Switch editor focus",
-        badge: entry.kind === "blocks" ? "Blocks" : "File",
-        icon: entry.kind === "blocks" ? <FiZap size={14} /> : <FiFile size={14} />,
-        onSelect: () => openEditorEntry(entry),
-      }));
-
-    const taskItems = canEdit
-      ? sortedTasks
-          .filter((task) => matches(task.content))
-          .slice(0, 8)
-          .map((task) => ({
-            key: `task-${task.id}`,
-            title: task.is_done ? `Re-open task: ${compact(task.content)}` : `Complete task: ${compact(task.content)}`,
-            subtitle: task.assigned_to_name ? `Assigned to ${task.assigned_to_name}` : "No assignee",
-            badge: task.is_done ? "Done" : "Open",
-            icon: <FiCheck size={14} />,
-            onSelect: () => toggleTask(task),
-          }))
-      : [];
-
-    const snapshotItems = sortedSnapshots
-      .filter((snapshot) => matches(snapshot.name || "checkpoint"))
-      .slice(0, 6)
-      .map((snapshot) => ({
-        key: `snapshot-${snapshot.id}`,
-        title: `Inspect checkpoint: ${compact(snapshot.name || "Untitled")}`,
-        subtitle: canEdit ? "Preview diffs and restore files" : "Preview diffs",
-        badge: "Checkpoint",
-        icon: <FiRefreshCw size={14} />,
-        onSelect: () => inspectSnapshot(snapshot),
-      }));
-
-    return [...commandItems, ...fileItems, ...taskItems, ...snapshotItems];
+    const query = commandPaletteQuery.trim();
+    return flattenedEditorEntries
+      .map((entry) => ({ entry, score: fuzzyFileScore(entry.fullName || entry.name, query) }))
+      .filter(({ score }) => score >= 0)
+      .sort((a, b) => b.score - a.score)
+      .slice(0, 30)
+      .map(({ entry }) => {
+        const full = entry.fullName || entry.name;
+        const slash = full.lastIndexOf("/");
+        const name = slash >= 0 ? full.slice(slash + 1) : full;
+        const dir = slash >= 0 ? full.slice(0, slash) : "";
+        return {
+          key: entry.key,
+          title: name,
+          subtitle: dir || undefined,
+          badge: isEditorEntryActive(entry) ? "Open" : entry.kind === "blocks" ? "Blocks" : undefined,
+          icon: entry.kind === "blocks" ? <FiZap size={14} /> : <FiFile size={14} />,
+          onSelect: () => openEditorEntry(entry),
+        };
+      });
   }, [
     commandPaletteQuery,
-    currentFile?.name,
-    running,
-    terminalOpen,
-    runHistoryOpen,
-    runHistory.length,
-    canEdit,
-    isViewerMode,
-    sessionChatOpen,
-    files,
-    currentFileId,
-    activeEditorKind,
-    isPybricksProject,
-    showGeneratedBlockCode,
-    canConnectLocalPybricksHub,
-    pybricksHubState.connected,
-    pybricksHubState.transportLabel,
-    runtimeReady,
-    pybricksConnectionBusy,
-    voiceEnabled,
-    voiceParticipantCount,
-    voiceJoining,
-    voicePanelOpen,
-    sortedTasks,
-    sortedSnapshots,
-    runCode,
-    stopCode,
-    clearTerminal,
-    disconnectPybricksHub,
-    joinVoiceCall,
-    leaveVoiceCall,
-    navigate,
-    createFile,
-    openCreateFileMenu,
-    createSnapshot,
-    currentBlockDocumentId,
-    selectFile,
-    selectBlockDocument,
-    toggleTask,
-    inspectSnapshot,
     flattenedEditorEntries,
+    activeEditorKind,
+    currentFileId,
+    currentBlockDocumentId,
     isBlockEditorActive,
   ]);
 
@@ -4860,6 +4790,56 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                     <FiCode size={16} />
                   </button>
                 )}
+                {isPybricksProject && visibleHubConnected && (
+                  <div className="hub-info-control">
+                    <button
+                      ref={hubInfoTriggerRef}
+                      type="button"
+                      className={`hub-info-trigger ${hubInfoOpen ? "active" : ""}`}
+                      onClick={() => setHubInfoOpen((open) => !open)}
+                      title={visibleHubTitle || "Hub port readings are starting"}
+                      aria-expanded={hubInfoOpen}
+                    >
+                      <span className="hub-info-battery">
+                        {visibleTelemetryAvailable && Number.isFinite(visibleHubInfo?.batteryPercent)
+                          ? `${visibleHubInfo.batteryPercent}%`
+                          : visibleHubInfo?.telemetryError
+                            ? "Readings unavailable"
+                          : visibleHubInfo?.hubRunning
+                            ? "Readings paused"
+                            : "Reading…"}
+                      </span>
+                      {visibleActivePorts.slice(0, 2).map((port) => (
+                        <span className="hub-info-port-summary" key={port.port}>
+                          <strong>{port.port}</strong> {formatPortReading(port)}
+                        </span>
+                      ))}
+                      <FiChevronDown size={13} />
+                    </button>
+                    {hubInfoOpen && (
+                      <div className="hub-info-popover" style={hubInfoPopoverStyle || undefined}>
+                        <HubInfoPanel
+                          hub={visibleHubInfo}
+                          isRemoteGuest={isRemoteHubGuestMode}
+                          remoteHostName={remoteHubHost?.userName}
+                          onAction={!isRemoteHubGuestMode && canEdit ? sendHubAction : undefined}
+                        />
+                      </div>
+                    )}
+                  </div>
+                )}
+                {isPybricksProject && canConnectLocalPybricksHub && canEdit && (
+                  <PybricksLiveControl
+                    projectId={projectApiId}
+                    hubType={pybricksHubState.hubType}
+                    connected={pybricksHubState.connected}
+                    running={running}
+                    active={liveControlActive}
+                    onStart={startLiveControl}
+                    onCommand={sendLiveControlCommand}
+                    onStop={stopLiveControl}
+                  />
+                )}
                 {isPybricksProject && canConnectLocalPybricksHub && (
                   <button
                     className={`btn ${pybricksHubState.connected ? "btn-ghost pybricks-connect-btn-connected" : "btn-primary pybricks-connect-btn"}`}
@@ -5438,13 +5418,13 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       <CommandPalette
         open={commandPaletteOpen}
         onClose={() => setCommandPaletteOpen(false)}
-        title="Editor Command Center"
-        placeholder="Run commands, open files, toggle tasks..."
+        title="Go to File"
+        placeholder="Search files..."
         query={commandPaletteQuery}
         onQueryChange={setCommandPaletteQuery}
         items={commandPaletteItems}
-        emptyText="No matching command. Try file names, tasks, or actions."
-        footerHint="Editor commands • Cmd/Ctrl+K"
+        emptyText="No files match your search."
+        footerHint="Switch files • Cmd/Ctrl+K"
       />
 
       {/* Connection Error Toast */}

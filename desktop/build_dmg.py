@@ -216,12 +216,16 @@ def main():
         mount_dir = Path(mount_lines[-1].split("\t")[-1].strip())
 
         try:
-            run(["SetFile", "-a", "V", str(mount_dir / ".background")])
-            run(["SetFile", "-a", "V", str(mount_dir / ".VolumeIcon.icns")])
-            run(["SetFile", "-a", "C", str(mount_dir)])
-            time.sleep(1)
-            set_finder_layout(mount_dir)
-            wait_for_finder_metadata(mount_dir)
+            try:
+                if shutil.which("SetFile"):
+                    run(["SetFile", "-a", "V", str(mount_dir / ".background")])
+                    run(["SetFile", "-a", "V", str(mount_dir / ".VolumeIcon.icns")])
+                    run(["SetFile", "-a", "C", str(mount_dir)])
+                time.sleep(1)
+                set_finder_layout(mount_dir)
+                wait_for_finder_metadata(mount_dir)
+            except (RuntimeError, subprocess.CalledProcessError) as exc:
+                print(f"Warning: could not persist Finder DMG layout; continuing with a plain DMG. {exc}")
         finally:
             run(["hdiutil", "detach", str(mount_dir)])
 
