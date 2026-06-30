@@ -1,4 +1,4 @@
-import { Suspense, lazy, useEffect, useState, useRef } from "react";
+import { Component, Suspense, lazy, useEffect, useState, useRef } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import {
@@ -14,9 +14,38 @@ import {
 
 const LandingVoxelScene = lazy(() => import("../components/LandingVoxelScene"));
 
+function supportsWebGL() {
+  if (typeof document === "undefined") return false;
+
+  try {
+    const canvas = document.createElement("canvas");
+    return Boolean(canvas.getContext("webgl2", { alpha: true }));
+  } catch {
+    return false;
+  }
+}
+
 function shouldShowLandingVoxel() {
   if (typeof window === "undefined") return false;
-  return window.innerWidth >= 900;
+  return window.innerWidth >= 900 && supportsWebGL();
+}
+
+class LandingVisualBoundary extends Component {
+  state = { failed: false };
+
+  static getDerivedStateFromError() {
+    return { failed: true };
+  }
+
+  componentDidCatch(error) {
+    console.warn("Landing visual disabled because WebGL initialization failed.", error);
+    this.props.onUnavailable();
+  }
+
+  render() {
+    if (this.state.failed) return null;
+    return this.props.children;
+  }
 }
 
 function Atmosphere() {
@@ -326,7 +355,7 @@ export default function Landing({ theme, toggleTheme }) {
     if (typeof window === "undefined") return undefined;
 
     const mediaQuery = window.matchMedia("(max-width: 899px)");
-    const syncLandingVoxel = () => setShowLandingVoxel(!mediaQuery.matches);
+    const syncLandingVoxel = () => setShowLandingVoxel(!mediaQuery.matches && supportsWebGL());
 
     syncLandingVoxel();
 
@@ -343,9 +372,11 @@ export default function Landing({ theme, toggleTheme }) {
     <div className={`landing-page${showLandingVoxel ? " landing-page--voxelized" : ""}`}>
       <Atmosphere />
       {showLandingVoxel ? (
-        <Suspense fallback={null}>
-          <LandingVoxelScene platformRef={platformRef} ctaRef={ctaRef} theme={theme} />
-        </Suspense>
+        <LandingVisualBoundary onUnavailable={() => setShowLandingVoxel(false)}>
+          <Suspense fallback={null}>
+            <LandingVoxelScene platformRef={platformRef} ctaRef={ctaRef} theme={theme} />
+          </Suspense>
+        </LandingVisualBoundary>
       ) : null}
 
       <nav className="landing-nav">

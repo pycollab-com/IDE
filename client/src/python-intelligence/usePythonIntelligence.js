@@ -1,43 +1,21 @@
 import { useEffect, useMemo, useRef } from "react";
-import { autocompletion, snippetCompletion, startCompletion } from "@codemirror/autocomplete";
-import { EditorSelection } from "@codemirror/state";
-import { EditorView, ViewPlugin, hoverTooltip } from "@codemirror/view";
+import {
+  acceptCompletion,
+  autocompletion,
+  completionStatus,
+  snippetCompletion,
+  startCompletion,
+} from "@codemirror/autocomplete";
+import { Prec } from "@codemirror/state";
+import { EditorView, ViewPlugin, hoverTooltip, keymap } from "@codemirror/view";
 import { PythonIntelligenceService } from "./pythonIntelligenceService";
+import {
+  buildCompletionOptions,
+  buildRemainingKeywordDescriptors,
+  usedKeywordNames,
+} from "./pythonCompletions";
 
 const IDENTIFIER_CHAR_RE = /[A-Za-z0-9_]/;
-
-const SNIPPET_OPTIONS = Object.freeze([
-  snippetCompletion("for ${item} in ${iterable}:\n    ${}", {
-    label: "for",
-    detail: "snippet",
-    type: "keyword",
-  }),
-  snippetCompletion("def ${name}(${params}):\n    ${}", {
-    label: "def",
-    detail: "snippet",
-    type: "keyword",
-  }),
-  snippetCompletion("class ${Name}:\n    def __init__(self):\n        ${}", {
-    label: "class",
-    detail: "snippet",
-    type: "keyword",
-  }),
-  snippetCompletion("while ${condition}:\n    ${}", {
-    label: "while",
-    detail: "snippet",
-    type: "keyword",
-  }),
-  snippetCompletion("if __name__ == \"__main__\":\n    ${}", {
-    label: "ifmain",
-    detail: "snippet",
-    type: "keyword",
-  }),
-  snippetCompletion("try:\n    ${}\nexcept ${Exception} as ${error}:\n    pass", {
-    label: "try",
-    detail: "snippet",
-    type: "keyword",
-  }),
-]);
 
 function positionToLineColumn(doc, pos) {
   const line = doc.lineAt(pos);
@@ -73,86 +51,6 @@ function buildProjectSnapshot(projectState, liveCode) {
   };
 }
 
-function isInsideUnclosedParentheses(doc, pos) {
-  const start = Math.max(0, pos - 600);
-  const text = doc.sliceString(start, pos);
-  let depth = 0;
-
-  for (let index = text.length - 1; index >= 0; index -= 1) {
-    const char = text[index];
-    if (char === ")") {
-      depth += 1;
-      continue;
-    }
-    if (char === "(") {
-      if (depth === 0) {
-        return true;
-      }
-      depth -= 1;
-    }
-  }
-
-  return false;
-}
-
-function shouldHideCompletion(item, typedPrefix, isPybricksProject) {
-  const name = String(item?.name || item?.label || "");
-  if (!name) return true;
-
-  const wantsPrivate = String(typedPrefix || "").startsWith("_");
-  if (!wantsPrivate && name.startsWith("_")) {
-    return true;
-  }
-
-  const fullName = String(item?.fullName || "");
-  if (isPybricksProject) {
-    if (fullName.startsWith("typing.") || fullName.startsWith("enum.")) {
-      return true;
-    }
-    if (name === "mro" && fullName.startsWith("builtins.type.")) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function mapCompletionType(kind, label = "") {
-  if (label.endsWith("=")) return "property";
-
-  switch (kind) {
-    case "module":
-    case "namespace":
-      return "module";
-    case "class":
-      return "class";
-    case "function":
-      return "function";
-    case "property":
-      return "property";
-    case "param":
-      return "variable";
-    case "keyword":
-      return "keyword";
-    case "statement":
-    case "instance":
-      return "variable";
-    default:
-      return "variable";
-  }
-}
-
-function dedupeCompletionOptions(options) {
-  const seen = new Set();
-  return options.filter((option) => {
-    if (!option?.label || seen.has(option.label)) {
-      return false;
-    }
-    seen.add(option.label);
-    return true;
-  });
-}
-
 function getLinePrefix(doc, pos) {
   const line = doc.lineAt(pos);
   return line.text.slice(0, pos - line.from);
@@ -169,315 +67,23 @@ function isImportOrDefinitionContext(doc, pos) {
   return false;
 }
 
-function normalizeParameter(parameter) {
-  const rawLabel = String(parameter?.label || parameter?.name || "").trim();
-  if (!rawLabel || rawLabel === "/" || rawLabel === "*") {
-    return null;
+function getImportCompletionContext(doc, pos) {
+  const prefix = getLinePrefix(doc, pos);
+  if (/^\s*from\s+[\w.]+\s+import\s+[^#]*$/.test(prefix)) {
+    return "from-import";
   }
-
-  const nameChunk = rawLabel.split(":", 1)[0].split("=", 1)[0].trim();
-  const normalizedName = nameChunk.replace(/^\*+/, "").trim();
-  if (!normalizedName || normalizedName === "/" || normalizedName === "*") {
-    return null;
+  if (/^\s*import\s+[^#]*$/.test(prefix)) {
+    return "import";
   }
-
-  const typeMatch = rawLabel.match(/^[^:=]+:\s*([^=]+?)(?:\s*=\s*.*)?$/);
-  return {
-    name: normalizedName,
-    label: rawLabel,
-    typeName: typeMatch ? typeMatch[1].trim() : "",
-    hasDefault: /\s=\s*/.test(rawLabel),
-    isSelfParameter: normalizedName === "self" || normalizedName === "cls",
-    isVarArg: /^\*/.test(nameChunk),
-  };
+  return "";
 }
 
-function normalizeParameters(parameters) {
-  return (Array.isArray(parameters) ? parameters : [])
-    .map(normalizeParameter)
-    .filter((parameter) => parameter && !parameter.isSelfParameter && !parameter.isVarArg);
-}
-
-function guessParameterValue(parameter, isPybricksProject) {
-  const name = String(parameter?.name || "");
-  const lowerName = name.toLowerCase();
-  const typeName = String(parameter?.typeName || "");
-  const lowerType = typeName.toLowerCase();
-
-  if (
-    /\bport\b/i.test(typeName) ||
-    lowerName === "port" ||
-    lowerName.endsWith("_port") ||
-    lowerName.endsWith("port")
-  ) {
-    return "Port.A";
-  }
-  if (/\b(str|string|text)\b/.test(lowerType)) {
-    return "\"\"";
-  }
-  if (/\b(bytes|bytearray)\b/.test(lowerType)) {
-    return "b\"\"";
-  }
-  if (/\b(bool|boolean)\b/.test(lowerType) || /^(is_|has_|should_|can_)/.test(lowerName)) {
-    return "False";
-  }
-  if (/\b(float|double|decimal|real|supportsfloat)\b/.test(lowerType)) {
-    return "0.0";
-  }
-  if (
-    /\b(int|integer|number)\b/.test(lowerType) ||
-    lowerName === "time" ||
-    lowerName.endsWith("_ms") ||
-    lowerName.endsWith("ms")
-  ) {
-    return "0";
-  }
-  if (/\b(dict|mapping|json)\b/.test(lowerType)) {
-    return "{}";
-  }
-  if (/\b(tuple)\b/.test(lowerType)) {
-    return "()";
-  }
-  if (/\b(set)\b/.test(lowerType)) {
-    return "set()";
-  }
-  if (/\b(list|sequence|iterable|array)\b/.test(lowerType)) {
-    return "[]";
-  }
-  if (/\b(callable|function|callback|handler)\b/.test(lowerType) || /(callback|handler)$/.test(lowerName)) {
-    return name || "callback";
-  }
-  if (/\b(url|uri)\b/.test(lowerName)) {
-    return "\"\"";
-  }
-  if (/\b(path|filename|file)\b/.test(lowerName)) {
-    return "\"\"";
-  }
-  if (/\b(name|text|message|label|title)\b/.test(lowerName) && !isPybricksProject) {
-    return "\"\"";
-  }
-
-  return name || "value";
-}
-
-function buildArgumentEntries(parameters, startIndex = 0) {
-  return normalizeParameters(parameters).slice(Math.max(0, startIndex));
-}
-
-function buildArgumentPreview(parameters, { isPybricksProject, namedArguments = false, requiredOnly = false } = {}) {
-  const entries = (requiredOnly ? parameters.filter((parameter) => !parameter.hasDefault) : parameters).filter(Boolean);
-  return entries
-    .map((parameter) => {
-      const value = guessParameterValue(parameter, isPybricksProject);
-      return namedArguments ? `${parameter.name}=${value}` : value;
-    })
-    .join(", ");
-}
-
-function selectionOffsetsForValue(value, prefix = "") {
-  const normalizedValue = String(value || "");
-  const normalizedPrefix = String(prefix || "");
-  const prefixLength = normalizedPrefix.length;
-
-  if (!normalizedValue) {
-    return { start: prefixLength, end: prefixLength };
-  }
-  if (/^b?""$/.test(normalizedValue)) {
-    return { start: prefixLength + normalizedValue.indexOf("\"") + 1, end: prefixLength + normalizedValue.length - 1 };
-  }
-  if (
-    (normalizedValue.startsWith("\"") && normalizedValue.endsWith("\"")) ||
-    (normalizedValue.startsWith("'") && normalizedValue.endsWith("'")) ||
-    (normalizedValue.startsWith("[") && normalizedValue.endsWith("]")) ||
-    (normalizedValue.startsWith("{") && normalizedValue.endsWith("}")) ||
-    (normalizedValue.startsWith("(") && normalizedValue.endsWith(")"))
-  ) {
-    return {
-      start: prefixLength + 1,
-      end: Math.max(prefixLength + 1, prefixLength + normalizedValue.length - 1),
-    };
-  }
-
-  return {
-    start: prefixLength,
-    end: prefixLength + normalizedValue.length,
-  };
-}
-
-function buildArgumentInsertSpec(parameters, { isPybricksProject, namedArguments = false, requiredOnly = false } = {}) {
-  const entries = (requiredOnly ? parameters.filter((parameter) => !parameter.hasDefault) : parameters).filter(Boolean);
-  if (!entries.length) {
-    return { text: "", selectionStart: 0, selectionEnd: 0 };
-  }
-
-  const firstValue = guessParameterValue(entries[0], isPybricksProject);
-  const firstPrefix = namedArguments ? `${entries[0].name}=` : "";
-  const text = entries
-    .map((parameter) => {
-      const value = guessParameterValue(parameter, isPybricksProject);
-      return namedArguments ? `${parameter.name}=${value}` : value;
-    })
-    .join(", ");
-  const firstSelection = selectionOffsetsForValue(firstValue, firstPrefix);
-
-  return {
-    text,
-    selectionStart: firstSelection.start,
-    selectionEnd: firstSelection.end,
-  };
-}
-
-function createTextApply(insertText, selectionStart = insertText.length, selectionEnd = selectionStart) {
-  return (view, _completion, from, to) => {
-    view.dispatch(
-      view.state.update({
-        changes: { from, to, insert: insertText },
-        selection: EditorSelection.single(from + selectionStart, from + selectionEnd),
-        scrollIntoView: true,
-        userEvent: "input.complete",
-      })
-    );
-  };
-}
-
-function buildCallableTemplateOption(item, context, snapshot) {
-  if (!item?.callable || !item?.name || isImportOrDefinitionContext(context.state.doc, context.pos)) {
-    return null;
-  }
-
-  const signature = item.signatures?.[0] || null;
-  const parameters = buildArgumentEntries(signature?.parameters || [], 0);
-  const requiredParameters = parameters.filter((parameter) => !parameter.hasDefault);
-  const insertSpec = buildArgumentInsertSpec(requiredParameters, {
-    isPybricksProject: snapshot.isPybricksProject,
-    requiredOnly: true,
-  });
-  const previewArgs = buildArgumentPreview(requiredParameters, {
-    isPybricksProject: snapshot.isPybricksProject,
-    requiredOnly: true,
-  });
-  const insertText = `${item.name}(${insertSpec.text})`;
-  const selectionBaseOffset = item.name.length + 1;
-
-  return {
-    label: `${item.name}(${previewArgs})`,
-    filterText: item.name,
-    detail: signature?.label || item.detail || "call",
-    type: mapCompletionType(item.kind, item.name),
-    boost: 125,
-    apply: createTextApply(
-      insertText,
-      selectionBaseOffset + insertSpec.selectionStart,
-      selectionBaseOffset + insertSpec.selectionEnd
-    ),
-  };
-}
-
-function toCompletionOptions(item, context, snapshot) {
-  const label = item.label || item.name || "";
-  if (!label) {
-    return [];
-  }
-
-  const options = [];
-  const callableTemplate = buildCallableTemplateOption(item, context, snapshot);
-  if (callableTemplate) {
-    options.push(callableTemplate);
-  }
-
-  options.push({
-    label,
-    detail: item.signatures?.[0]?.label || item.detail || "",
-    type: mapCompletionType(item.kind, label),
-  });
-
-  return options;
-}
-
-function buildCallArgumentOptions(signatureHelp, snapshot) {
-  const activeSignature = signatureHelp?.signatures?.[signatureHelp.activeSignature || 0];
-  if (!activeSignature) {
-    return [];
-  }
-
-  const allParameters = normalizeParameters(activeSignature.parameters || []);
-  const requestedIndex = Math.max(0, activeSignature.activeParameter ?? signatureHelp.activeParameter ?? 0);
-  const activeIndex = allParameters.length ? Math.min(requestedIndex, allParameters.length - 1) : 0;
-  const parameters = allParameters.slice(activeIndex);
-  if (!parameters.length) {
-    return [];
-  }
-
-  const requiredParameters = parameters.filter((parameter) => !parameter.hasDefault);
-  const options = [];
-
-  const positionalPreview = buildArgumentPreview(requiredParameters, {
-    isPybricksProject: snapshot.isPybricksProject,
-    requiredOnly: true,
-  });
-  const positionalInsertSpec = buildArgumentInsertSpec(requiredParameters, {
-    isPybricksProject: snapshot.isPybricksProject,
-    requiredOnly: true,
-  });
-  if (positionalInsertSpec.text) {
-    options.push({
-      label: positionalPreview,
-      filterText: parameters[0]?.name || positionalPreview,
-      detail: `required arguments for ${activeSignature.label}`,
-      type: "variable",
-      boost: 140,
-      apply: createTextApply(
-        positionalInsertSpec.text,
-        positionalInsertSpec.selectionStart,
-        positionalInsertSpec.selectionEnd
-      ),
-    });
-  }
-
-  parameters.forEach((parameter, index) => {
-    const valuePreview = guessParameterValue(parameter, snapshot.isPybricksProject);
-    const insertSpec = buildArgumentInsertSpec([parameter], {
-      isPybricksProject: snapshot.isPybricksProject,
-      namedArguments: true,
-    });
-    options.push({
-      label: `${parameter.name}=`,
-      filterText: parameter.name,
-      detail: parameter.label || valuePreview,
-      type: "property",
-      boost: 110 - index,
-      apply: createTextApply(insertSpec.text, insertSpec.selectionStart, insertSpec.selectionEnd),
-    });
-  });
-
-  return options;
-}
-
-function buildRequiredArgumentFill(signatureHelp, snapshot) {
-  const activeSignature = signatureHelp?.signatures?.[signatureHelp.activeSignature || 0];
-  if (!activeSignature) {
-    return null;
-  }
-
-  const allParameters = normalizeParameters(activeSignature.parameters || []);
-  const requestedIndex = Math.max(0, activeSignature.activeParameter ?? signatureHelp.activeParameter ?? 0);
-  const activeIndex = allParameters.length ? Math.min(requestedIndex, allParameters.length - 1) : 0;
-  const parameters = allParameters.slice(activeIndex);
-  const requiredParameters = parameters.filter((parameter) => !parameter.hasDefault);
-  if (!requiredParameters.length) {
-    return null;
-  }
-
-  return {
-    preview: buildArgumentPreview(requiredParameters, {
-      isPybricksProject: snapshot.isPybricksProject,
-      requiredOnly: true,
-    }),
-    ...buildArgumentInsertSpec(requiredParameters, {
-      isPybricksProject: snapshot.isPybricksProject,
-      requiredOnly: true,
-    }),
-  };
+// A descriptor carries a `template` only when it should be inserted as a
+// tab-through snippet; everything else is inserted verbatim. Completion rows
+// stay lean — no doc panel — so the list reads as autocomplete, not an essay.
+function descriptorToCompletion(descriptor) {
+  const { template, ...completion } = descriptor;
+  return template ? snippetCompletion(template, completion) : completion;
 }
 
 function getIdentifierRange(doc, pos) {
@@ -604,6 +210,9 @@ function appendHighlightedSignature(container, label, activeParameterLabel) {
   container.appendChild(line);
 }
 
+// While you fill a call, show only the signature line with the active parameter
+// highlighted, plus that one parameter's short description. Deliberately compact
+// — no full parameter dump, no multi-paragraph docstring (that lives in hover).
 function createSignatureTooltipDom(signatureHelp) {
   const dom = document.createElement("div");
   dom.className = "cm-python-intelligence-tooltip cm-python-intelligence-signature-tooltip";
@@ -619,7 +228,11 @@ function createSignatureTooltipDom(signatureHelp) {
   );
   const activeParameter = activeSignature.parameters?.[activeParameterIndex] || null;
   appendHighlightedSignature(dom, activeSignature.label || "", activeParameter?.label || "");
-  renderDocumentation(dom, activeSignature.documentation, activeParameterIndex, activeSignature.parameters || []);
+
+  const activeDoc = String(activeParameter?.documentation || "").trim();
+  if (activeDoc) {
+    appendSection(dom, null, activeDoc.split("\n")[0], "cm-python-intelligence-section summary");
+  }
 
   return dom;
 }
@@ -639,16 +252,22 @@ function createHoverTooltipDom(hover) {
   return dom;
 }
 
-function insertedTriggerCharacter(update) {
-  let triggered = false;
+// The trigger character just typed, if any: `.` pops member lists, `(`/`,` pop a
+// call's parameter picker the moment you open or continue an argument list
+// (`print(▌`, `Motor(port, ▌`). Returns the character or null.
+function insertedTriggerChar(update) {
+  let trigger = null;
   update.changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
-    if (triggered) return;
-    const text = inserted.toString();
-    if (text.includes(".") || text.includes("(") || text.includes(",")) {
-      triggered = true;
-    }
+    if (trigger) return;
+    const match = inserted.toString().match(/[.(,]/);
+    if (match) trigger = match[0];
   });
-  return triggered;
+  return trigger;
+}
+
+function lineIsDefinition(view) {
+  const line = view.state.doc.lineAt(view.state.selection.main.head);
+  return /^\s*(?:async\s+)?(?:def|class)\b/.test(line.text);
 }
 
 function hasUserInputChange(update) {
@@ -668,6 +287,46 @@ function shouldHandleInteractiveDocChange(update) {
   return update.docChanged && (hasUserInputChange(update) || editorHasActiveFocus(update.view));
 }
 
+// Locate the enclosing call and the argument the cursor sits in, so we can tell
+// a keyword-name slot (`Motor(port=Port.A, ▌)` -> offer remaining kwargs) from a
+// value slot (`Motor(port=▌)` -> complete values). Scans a bounded window back.
+function getCallArgumentContext(doc, pos) {
+  const windowStart = Math.max(0, pos - 2000);
+  const text = doc.sliceString(windowStart, pos);
+  let depth = 0;
+  let argStartRel = null;
+  let callOpenRel = null;
+
+  for (let i = text.length - 1; i >= 0; i -= 1) {
+    const char = text[i];
+    if (char === ")" || char === "]" || char === "}") {
+      depth += 1;
+    } else if (char === "(" || char === "[" || char === "{") {
+      if (depth === 0) {
+        if (char === "(") callOpenRel = i;
+        break;
+      }
+      depth -= 1;
+    } else if (char === "," && depth === 0 && argStartRel === null) {
+      argStartRel = i + 1;
+    }
+  }
+
+  if (callOpenRel === null) {
+    return { inCall: false };
+  }
+  if (argStartRel === null) {
+    argStartRel = callOpenRel + 1;
+  }
+  const argText = text.slice(argStartRel);
+  return {
+    inCall: true,
+    callOpenPos: windowStart + callOpenRel,
+    // A keyword-name slot is an argument that has not yet started its value.
+    keywordPosition: !argText.includes("="),
+  };
+}
+
 function createCompletionSource(service, getProjectState) {
   return async (context) => {
     const snapshot = buildProjectSnapshot(getProjectState(), context.state.doc.toString());
@@ -675,24 +334,24 @@ function createCompletionSource(service, getProjectState) {
       return null;
     }
 
+    const doc = context.state.doc;
     const cursorPos = context.pos;
-    const token = context.matchBefore(/[A-Za-z_][\w]*/);
-    const charBefore = context.state.doc.sliceString(Math.max(0, cursorPos - 1), cursorPos);
-    const shouldQuery = context.explicit || token || charBefore === "." || charBefore === "(" || charBefore === ",";
-    if (!shouldQuery) {
+    const token = context.matchBefore(/[A-Za-z_]\w*/);
+    const charBefore = doc.sliceString(Math.max(0, cursorPos - 1), cursorPos);
+    const isMemberAccess = charBefore === ".";
+    if (!context.explicit && !token && !isMemberAccess) {
       return null;
     }
 
-    const from = charBefore === "." || charBefore === "(" || charBefore === "," ? cursorPos : token ? token.from : cursorPos;
-    const { line, column } = positionToLineColumn(context.state.doc, cursorPos);
-    const shouldQuerySignatures =
-      charBefore === "(" ||
-      charBefore === "," ||
-      (Boolean(token) && isInsideUnclosedParentheses(context.state.doc, cursorPos)) ||
-      context.explicit;
+    const from = isMemberAccess ? cursorPos : token ? token.from : cursorPos;
+    const { line, column } = positionToLineColumn(doc, cursorPos);
+    const callContext = getCallArgumentContext(doc, cursorPos);
+    const wantKeywordArguments = callContext.inCall && callContext.keywordPosition;
 
+    let result;
+    let signatureHelp = null;
     try {
-      const [result, signatureHelp] = await Promise.all([
+      [result, signatureHelp] = await Promise.all([
         service.complete({
           files: snapshot.files,
           path: snapshot.path,
@@ -701,7 +360,7 @@ function createCompletionSource(service, getProjectState) {
           column,
           isPybricksProject: snapshot.isPybricksProject,
         }),
-        shouldQuerySignatures
+        wantKeywordArguments
           ? service.getSignatures({
               files: snapshot.files,
               path: snapshot.path,
@@ -712,28 +371,45 @@ function createCompletionSource(service, getProjectState) {
             })
           : Promise.resolve(null),
       ]);
-
-      const typedPrefix = token?.text || "";
-      const options = dedupeCompletionOptions([
-        ...buildCallArgumentOptions(signatureHelp, snapshot),
-        ...SNIPPET_OPTIONS,
-        ...((result?.items || [])
-          .filter((item) => !shouldHideCompletion(item, typedPrefix, snapshot.isPybricksProject))
-          .flatMap((item) => toCompletionOptions(item, context, snapshot))),
-      ]);
-
-      if (!options.length) {
-        return null;
-      }
-
-      return {
-        from,
-        options,
-        validFor: /^[A-Za-z_]*$/,
-      };
     } catch {
       return null;
     }
+
+    // Inside a call's keyword slot, surface the not-yet-supplied keyword
+    // arguments first (the spec's comma case), then the normal symbols so you
+    // can still pass a variable or expression.
+    let keywordOptions = [];
+    if (wantKeywordArguments) {
+      const activeSignature = signatureHelp?.signatures?.[signatureHelp.activeSignature || 0];
+      if (activeSignature?.parameters?.length) {
+        const used = usedKeywordNames(doc.sliceString(callContext.callOpenPos + 1, cursorPos));
+        keywordOptions = buildRemainingKeywordDescriptors(activeSignature.parameters, used);
+      }
+    }
+
+    const importContext = getImportCompletionContext(doc, cursorPos);
+    const importOrDef = Boolean(importContext) || isImportOrDefinitionContext(doc, cursorPos);
+    const options = [
+      ...keywordOptions,
+      ...buildCompletionOptions({
+        items: result?.items,
+        typedPrefix: token?.text || "",
+        isPybricksProject: snapshot.isPybricksProject,
+        importOrDef,
+        importContext,
+        allowSnippets: !isMemberAccess && !callContext.inCall && !importOrDef,
+      }),
+    ].map(descriptorToCompletion);
+
+    if (!options.length) {
+      return null;
+    }
+
+    return {
+      from,
+      options,
+      validFor: /^\w*$/,
+    };
   };
 }
 
@@ -782,6 +458,7 @@ function createSignatureExtension(service, getProjectState) {
     constructor(view) {
       this.view = view;
       this.timeoutId = null;
+      this.repositionFrame = null;
       this.requestId = 0;
       this.renderedCursorPos = null;
       this.host = view.dom.parentElement || view.dom;
@@ -798,8 +475,16 @@ function createSignatureExtension(service, getProjectState) {
     }
 
     update(update) {
+      // The completion popup already lists the parameters as you fill a call, so
+      // the signature hint would just overlap it. Yield to the popup entirely.
+      if (completionStatus(update.state) === "active") {
+        this.hide();
+        return;
+      }
       if (update.viewportChanged || update.geometryChanged) {
-        this.positionTooltip();
+        // Reading layout (coordsAtPos / getBoundingClientRect) is forbidden
+        // mid-update, so reposition on the next frame instead of inline.
+        this.scheduleReposition();
       }
       if (update.docChanged || update.selectionSet || update.focusChanged) {
         if (!editorHasActiveFocus(update.view)) {
@@ -818,6 +503,16 @@ function createSignatureExtension(service, getProjectState) {
         this.timeoutId = null;
         this.query();
       }, 90);
+    }
+
+    scheduleReposition() {
+      if (this.repositionFrame !== null) {
+        return;
+      }
+      this.repositionFrame = globalThis.requestAnimationFrame(() => {
+        this.repositionFrame = null;
+        this.positionTooltip();
+      });
     }
 
     hide() {
@@ -857,6 +552,11 @@ function createSignatureExtension(service, getProjectState) {
     }
 
     async query() {
+      if (completionStatus(this.view.state) === "active") {
+        this.hide();
+        return;
+      }
+
       const selection = this.view.state.selection.main;
       if (!selection.empty) {
         this.hide();
@@ -887,6 +587,12 @@ function createSignatureExtension(service, getProjectState) {
           return;
         }
 
+        // The popup may have opened during the await; don't draw over it.
+        if (completionStatus(this.view.state) === "active") {
+          this.hide();
+          return;
+        }
+
         if (!signatureHelp?.signatures?.length) {
           this.hide();
           return;
@@ -907,6 +613,9 @@ function createSignatureExtension(service, getProjectState) {
       if (this.timeoutId !== null) {
         globalThis.clearTimeout(this.timeoutId);
       }
+      if (this.repositionFrame !== null) {
+        globalThis.cancelAnimationFrame(this.repositionFrame);
+      }
       this.tooltipLayer.remove();
     }
   }
@@ -914,111 +623,40 @@ function createSignatureExtension(service, getProjectState) {
   return [ViewPlugin.fromClass(SignatureTooltipPlugin)];
 }
 
+// One Tab key, context-dependent — the way Xcode behaves. `acceptCompletion`
+// accepts the highlighted suggestion when the popup is open and otherwise
+// no-ops to `false`, so Tab falls straight through to snippet-field navigation
+// (jumping between argument placeholders) and finally to normal indentation.
+// Checking `completionStatus` here would be wrong: just after the popup opens
+// the status is briefly "pending", and a guarded Tab would indent instead.
+function createCompletionKeymap() {
+  return Prec.highest(
+    keymap.of([
+      {
+        key: "Tab",
+        run: acceptCompletion,
+      },
+    ])
+  );
+}
+
+// Auto-pop the completer after `.`, `(`, and `,` so member lists and call
+// parameter pickers appear without an explicit Ctrl-Space. `(`/`,` are skipped
+// on a `def`/`class` line, where the parens hold parameter *names* you're
+// declaring, not arguments to complete.
 function createTriggerExtension() {
   return EditorView.updateListener.of((update) => {
     if (!shouldHandleInteractiveDocChange(update)) {
       return;
     }
-    if (!insertedTriggerCharacter(update)) {
+    const trigger = insertedTriggerChar(update);
+    if (!trigger) {
+      return;
+    }
+    if ((trigger === "(" || trigger === ",") && lineIsDefinition(update.view)) {
       return;
     }
     queueMicrotask(() => startCompletion(update.view));
-  });
-}
-
-function createCallArgumentAutofillExtension(service, getProjectState) {
-  return EditorView.updateListener.of((update) => {
-    if (!shouldHandleInteractiveDocChange(update)) {
-      return;
-    }
-
-    let insertedCallTrigger = false;
-    update.changes.iterChanges((_fromA, _toA, _fromB, _toB, inserted) => {
-      if (insertedCallTrigger) {
-        return;
-      }
-      const text = inserted.toString();
-      if (text.includes("(") || text.includes(",")) {
-        insertedCallTrigger = true;
-      }
-    });
-
-    if (!insertedCallTrigger) {
-      return;
-    }
-
-    queueMicrotask(async () => {
-      const view = update.view;
-      const selection = view.state.selection.main;
-      if (!selection.empty) {
-        return;
-      }
-
-      const cursorPos = selection.head;
-      const previousChar = view.state.doc.sliceString(Math.max(0, cursorPos - 1), cursorPos);
-      if (previousChar !== "(" && previousChar !== ",") {
-        return;
-      }
-
-      const nextChar = view.state.doc.sliceString(cursorPos, Math.min(view.state.doc.length, cursorPos + 1));
-      if (nextChar && nextChar !== ")" && nextChar.trim()) {
-        return;
-      }
-
-      try {
-        for (let attempt = 0; attempt < 3; attempt += 1) {
-          const latestSelection = view.state.selection.main;
-          if (!latestSelection.empty || latestSelection.head !== cursorPos) {
-            return;
-          }
-
-          const latestPreviousChar = view.state.doc.sliceString(Math.max(0, cursorPos - 1), cursorPos);
-          const latestNextChar = view.state.doc.sliceString(cursorPos, Math.min(view.state.doc.length, cursorPos + 1));
-          if ((latestPreviousChar !== "(" && latestPreviousChar !== ",") || (latestNextChar && latestNextChar !== ")" && latestNextChar.trim())) {
-            return;
-          }
-
-          const snapshot = buildProjectSnapshot(getProjectState(), view.state.doc.toString());
-          if (!snapshot) {
-            return;
-          }
-
-          const { line, column } = positionToLineColumn(view.state.doc, cursorPos);
-          const signatureHelp = await service.getSignatures({
-            files: snapshot.files,
-            path: snapshot.path,
-            code: snapshot.code,
-            line,
-            column,
-            isPybricksProject: snapshot.isPybricksProject,
-          });
-          const fill = buildRequiredArgumentFill(signatureHelp, snapshot);
-          if (!fill?.text) {
-            if (attempt < 2) {
-              await new Promise((resolve) => globalThis.setTimeout(resolve, 80));
-              continue;
-            }
-            return;
-          }
-
-          view.dispatch(
-            view.state.update({
-              changes: { from: cursorPos, to: cursorPos, insert: fill.text },
-              selection: EditorSelection.single(
-                cursorPos + fill.selectionStart,
-                cursorPos + fill.selectionEnd
-              ),
-              scrollIntoView: true,
-              userEvent: "input.complete",
-            })
-          );
-          queueMicrotask(() => startCompletion(view));
-          return;
-        }
-      } catch {
-        // Ignore autofill failures to avoid blocking normal editing.
-      }
-    });
   });
 }
 
@@ -1044,13 +682,13 @@ export function usePythonIntelligence({ files, currentFile, isPybricksProject, r
   const extensions = useMemo(() => {
     const getProjectState = () => projectStateRef.current;
     return [
+      createCompletionKeymap(),
       autocompletion({
         override: [createCompletionSource(service, getProjectState)],
         activateOnTyping: true,
         maxRenderedOptions: 16,
       }),
       createTriggerExtension(),
-      createCallArgumentAutofillExtension(service, getProjectState),
       createHoverExtension(service, getProjectState),
       ...createSignatureExtension(service, getProjectState),
     ];

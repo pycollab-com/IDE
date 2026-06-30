@@ -4,15 +4,23 @@ import { FiChevronDown, FiChevronRight, FiFile, FiSearch, FiX } from "react-icon
 
 const SEARCH_RESULT_LIMIT = 500;
 
-const buildMatches = (files, query, caseSensitive) => {
+const prioritizeCurrentFile = (files, currentFileId) => {
+  if (!Array.isArray(files) || currentFileId == null) return files;
+  const currentFile = files.find((file) => file.id === currentFileId);
+  if (!currentFile) return files;
+  return [currentFile, ...files.filter((file) => file.id !== currentFileId)];
+};
+
+const buildMatches = (files, query, caseSensitive, currentFileId) => {
   if (!Array.isArray(files)) return [];
   const needle = caseSensitive ? query : query.toLowerCase();
   if (!needle) return [];
 
+  const orderedFiles = prioritizeCurrentFile(files, currentFileId);
   const groups = [];
   let total = 0;
 
-  for (const file of files) {
+  for (const file of orderedFiles) {
     if (total >= SEARCH_RESULT_LIMIT) break;
     const content = typeof file.content === "string" ? file.content : "";
     const lines = content.split("\n");
@@ -51,7 +59,7 @@ const buildMatches = (files, query, caseSensitive) => {
   return groups;
 };
 
-export default function ProjectSearch({ open, files, onClose, onSelect }) {
+export default function ProjectSearch({ open, files, currentFileId, onClose, onSelect }) {
   const [query, setQuery] = useState("");
   const [caseSensitive, setCaseSensitive] = useState(false);
   const [collapsedFiles, setCollapsedFiles] = useState({});
@@ -60,8 +68,8 @@ export default function ProjectSearch({ open, files, onClose, onSelect }) {
   const activeResultRef = useRef(null);
 
   const groups = useMemo(
-    () => buildMatches(files, query.trim(), caseSensitive),
-    [caseSensitive, files, query]
+    () => buildMatches(files, query.trim(), caseSensitive, currentFileId),
+    [caseSensitive, currentFileId, files, query]
   );
   const results = useMemo(() => groups.flatMap((group) => group.matches), [groups]);
   const visibleResults = useMemo(
@@ -196,7 +204,10 @@ export default function ProjectSearch({ open, files, onClose, onSelect }) {
                     {collapsed ? <FiChevronRight size={14} /> : <FiChevronDown size={14} />}
                     <FiFile size={14} />
                     <span>{group.file.name}</span>
-                    <b>{group.matches.length}</b>
+                    <span className="project-search-file-badges">
+                      {group.file.id === currentFileId && <b>Current</b>}
+                      <b>{group.matches.length}</b>
+                    </span>
                   </button>
                   {!collapsed &&
                     group.matches.map((result) => {

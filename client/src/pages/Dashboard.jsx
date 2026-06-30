@@ -10,19 +10,36 @@ import {
   FiMoreHorizontal,
   FiPlus,
   FiTrash2,
-  FiWifiOff,
   FiZap,
 } from "react-icons/fi";
 import VerifiedBadge from "../components/VerifiedBadge";
-import DesktopWorkspacePanel from "../components/DesktopWorkspacePanel";
+import { Skeleton } from "../components/Skeleton";
+import { skeletonDebugEnabled } from "../utils/skeletonDebug";
 import TypeModal from "./dashboards/TypeModal";
 import useDashboardData from "./dashboards/useDashboardData";
 import "./dashboards/dashboards.css";
 
-export default function Dashboard({ user, hostedOnline = true, desktopContext = null }) {
-  const d = useDashboardData({ hostedOnline });
+function ProjectCardSkeleton() {
+  return (
+    <article className="dv5-card skeleton-card" aria-hidden="true">
+      <div className="dv5-card-stripe" />
+      <div className="dv5-card-top">
+        <Skeleton className="skeleton-icon-button" rounded />
+      </div>
+      <div className="dv5-card-body">
+        <Skeleton className="dv5-card-icon skeleton-card-icon" rounded />
+        <Skeleton className="skeleton-heading-line" />
+        <Skeleton className="skeleton-pill" />
+      </div>
+      <Skeleton className="dv5-card-open skeleton-button" />
+    </article>
+  );
+}
+
+export default function Dashboard({ user }) {
+  const d = useDashboardData();
   const [openMenuProjectId, setOpenMenuProjectId] = useState(null);
-  const actionsDisabled = !hostedOnline;
+  const showSkeletons = skeletonDebugEnabled();
 
   useEffect(() => {
     if (openMenuProjectId == null) return undefined;
@@ -34,10 +51,9 @@ export default function Dashboard({ user, hostedOnline = true, desktopContext = 
 
   const closeMenu = () => setOpenMenuProjectId(null);
 
-  const handleMenuToggle = (event, project) => {
+  const handleMenuToggle = (event, projectId) => {
     event.stopPropagation();
-    if (actionsDisabled && !d.isOfflineCopyProject(project)) return;
-    setOpenMenuProjectId((current) => (current === project.id ? null : project.id));
+    setOpenMenuProjectId((current) => (current === projectId ? null : projectId));
   };
 
   const handleRenameStart = (event, project) => {
@@ -55,7 +71,7 @@ export default function Dashboard({ user, hostedOnline = true, desktopContext = 
   const handleDelete = async (event, project) => {
     event.stopPropagation();
     closeMenu();
-    await d.deleteProject(project);
+    await d.deleteProject(project.id, project.name);
   };
 
   const greetingName = user?.display_name || "there";
@@ -79,9 +95,8 @@ export default function Dashboard({ user, hostedOnline = true, desktopContext = 
               placeholder="New project..."
               value={d.name}
               onChange={(event) => d.setName(event.target.value)}
-              disabled={actionsDisabled}
             />
-            <button className="btn" type="submit" disabled={d.creating || actionsDisabled}>
+            <button className="btn" type="submit" disabled={d.creating}>
               <FiPlus size={16} />
             </button>
           </form>
@@ -97,24 +112,14 @@ export default function Dashboard({ user, hostedOnline = true, desktopContext = 
                 )
               }
               maxLength={6}
-              disabled={actionsDisabled}
               style={{ letterSpacing: 3, textAlign: "center", fontWeight: 600, width: 120 }}
             />
-            <button className="btn-secondary" type="button" onClick={d.joinProject} disabled={actionsDisabled}>
+            <button className="btn-secondary" type="button" onClick={d.joinProject}>
               <FiLink size={14} />
             </button>
           </div>
         </div>
       </header>
-
-      <DesktopWorkspacePanel desktopContext={desktopContext} />
-
-      {d.notice && (
-        <div className="dv5-notice">
-          <FiWifiOff size={18} />
-          <span>{d.notice}</span>
-        </div>
-      )}
 
       {d.error && (
         <div className="alert alert-error dv5-alert">
@@ -124,19 +129,20 @@ export default function Dashboard({ user, hostedOnline = true, desktopContext = 
 
       <section className="dv5-projects-shell" aria-label="Projects">
         <div className="dv5-gallery">
-          <AnimatePresence>
-            {d.projects.map((project, index) => {
+          {d.loading || showSkeletons ? (
+            Array.from({ length: 6 }).map((_, index) => <ProjectCardSkeleton key={index} />)
+          ) : (
+            <AnimatePresence>
+              {d.projects.map((project, index) => {
               const isPybricks = project.project_type === d.PROJECT_TYPE_PYBRICKS;
-              const isOfflineCopy = d.isOfflineCopyProject(project);
               const isRenaming = d.renamingProjectId === project.id;
               const isMenuOpen = openMenuProjectId === project.id;
-              const menuDisabled = actionsDisabled && !isOfflineCopy;
               const canManageProject = Boolean(project.permissions?.can_manage);
 
               return (
                 <motion.article
                   key={project.id}
-                  className={`dv5-card ${isPybricks ? "pybricks" : ""} ${isOfflineCopy ? "offline-copy" : ""}`}
+                  className={`dv5-card ${isPybricks ? "pybricks" : ""}`}
                   initial={{ opacity: 0, y: 16 }}
                   animate={{ opacity: 1, y: 0 }}
                   exit={{ opacity: 0, y: 16 }}
@@ -149,34 +155,29 @@ export default function Dashboard({ user, hostedOnline = true, desktopContext = 
                       <button
                         className="btn-ghost dv5-card-menu-trigger"
                         type="button"
-                        onClick={(event) => handleMenuToggle(event, project)}
+                        onClick={(event) => handleMenuToggle(event, project.id)}
                         aria-label={`Project actions for ${project.name}`}
                         aria-expanded={isMenuOpen}
-                        disabled={menuDisabled}
                       >
                         <FiMoreHorizontal size={16} />
                       </button>
 
                       {isMenuOpen && (
                         <div className="dv5-card-menu-panel">
-                          {(isOfflineCopy || canManageProject) && (
-                            <button type="button" className="dv5-menu-item" onClick={(event) => handleRenameStart(event, project)}>
-                              <FiEdit2 size={14} />
-                              Rename project
-                            </button>
-                          )}
-                          {!isOfflineCopy ? (
-                            <button
-                              type="button"
-                              className="dv5-menu-item"
-                              onClick={(event) => handleDuplicate(event, project)}
-                              disabled={d.rowActionLoading}
-                            >
-                              <FiCopy size={14} />
-                              Duplicate
-                            </button>
-                          ) : null}
-                          {(isOfflineCopy || canManageProject) && (
+                          <button type="button" className="dv5-menu-item" onClick={(event) => handleRenameStart(event, project)}>
+                            <FiEdit2 size={14} />
+                            Rename project
+                          </button>
+                          <button
+                            type="button"
+                            className="dv5-menu-item"
+                            onClick={(event) => handleDuplicate(event, project)}
+                            disabled={d.rowActionLoading}
+                          >
+                            <FiCopy size={14} />
+                            Duplicate
+                          </button>
+                          {canManageProject && (
                             <button type="button" className="dv5-menu-item danger" onClick={(event) => handleDelete(event, project)}>
                               <FiTrash2 size={14} />
                               Delete
@@ -204,7 +205,7 @@ export default function Dashboard({ user, hostedOnline = true, desktopContext = 
                     }
                   >
                     <div className="dv5-card-icon">
-                      {isOfflineCopy ? <FiWifiOff size={28} /> : isPybricks ? <FiZap size={28} /> : <FiCode size={28} />}
+                      {isPybricks ? <FiZap size={28} /> : <FiCode size={28} />}
                     </div>
 
                     {isRenaming ? (
@@ -228,24 +229,19 @@ export default function Dashboard({ user, hostedOnline = true, desktopContext = 
                     ) : (
                       <>
                         <h2 className="dv5-card-name">{project.name}</h2>
-                        {isOfflineCopy ? (
-                          <span className="dv5-card-visibility is-local-only">Local Only</span>
-                        ) : (
-                          <button
-                            className={`dv5-card-visibility ${project.is_public ? "is-public" : "is-private"}`}
-                            onClick={(event) => d.toggleVisibility(event, project)}
-                            type="button"
-                            disabled={actionsDisabled}
-                          >
-                            {project.is_public ? "Public" : "Private"}
-                          </button>
-                        )}
+                        <button
+                          className={`dv5-card-visibility ${project.is_public ? "is-public" : "is-private"}`}
+                          onClick={(event) => d.toggleVisibility(event, project)}
+                          type="button"
+                        >
+                          {project.is_public ? "Public" : "Private"}
+                        </button>
                       </>
                     )}
                   </div>
 
                   <button
-                    className={`dv5-card-open ${isPybricks ? "is-pybricks" : ""} ${isOfflineCopy ? "is-offline-copy" : ""}`}
+                    className={`dv5-card-open ${isPybricks ? "is-pybricks" : ""}`}
                     type="button"
                     onClick={() => d.openProject(project)}
                   >
@@ -253,18 +249,15 @@ export default function Dashboard({ user, hostedOnline = true, desktopContext = 
                   </button>
                 </motion.article>
               );
-            })}
-          </AnimatePresence>
+              })}
+            </AnimatePresence>
+          )}
 
-          {d.projects.length === 0 && (
+          {!d.loading && !showSkeletons && d.projects.length === 0 && (
             <div className="empty-state dv5-empty-state">
               <FiFolder size={48} />
-              <div>{hostedOnline ? "No projects yet" : "No cached hosted projects yet"}</div>
-              <span>
-                {hostedOnline
-                  ? "Create your first project to get started."
-                  : "Reconnect to Wi-Fi once to load your hosted projects into the desktop cache."}
-              </span>
+              <div>No projects yet</div>
+              <span>Create your first project to get started.</span>
             </div>
           )}
         </div>

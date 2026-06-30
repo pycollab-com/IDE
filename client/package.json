@@ -1,17 +1,20 @@
 {
-  "name": "pycollab-ide-client",
-  "version": "1.0.1",
+  "name": "collab-python-ide",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "sync:pyodide": "node ./scripts/sync-pyodide.mjs",
-    "build": "npm run sync:pyodide && vite build",
+    "build": "vite build",
+    "test:hub": "node --test src/runtime/pybricksRunner.test.js src/runtime/pybricksLiveControl.test.js src/runtime/hubDisplayGlyphs.test.js",
+    "test:intelligence": "node --test src/python-intelligence/pythonCompletions.test.js",
     "preview": "vite preview"
   },
   "dependencies": {
-    "@babel/runtime": "^7.28.4",
+    "@codemirror/autocomplete": "^6.20.0",
+    "@codemirror/commands": "^6.10.0",
     "@codemirror/lang-python": "^6.2.1",
+    "@codemirror/language": "^6.12.3",
     "@pybricks/mpy-cross-v6": "^2.0.0",
     "@react-oauth/google": "^0.13.4",
     "@simplewebauthn/browser": "^13.1.0",
@@ -22,7 +25,6 @@
     "blockly": "^12.5.1",
     "framer-motion": "^12.23.26",
     "partysocket": "1.1.6",
-    "pyodide": "^0.29.3",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-icons": "^5.5.0",

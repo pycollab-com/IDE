@@ -449,11 +449,17 @@ export default function LandingVoxelScene({ platformRef, ctaRef, theme }) {
     const prefersReducedMotion = window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     let quality = getQualityProfile();
 
-    const renderer = new THREE.WebGLRenderer({
-      antialias: !quality.constrained,
-      alpha: true,
-      powerPreference: quality.constrained ? "default" : "high-performance",
-    });
+    let renderer;
+    try {
+      renderer = new THREE.WebGLRenderer({
+        antialias: !quality.constrained,
+        alpha: true,
+        powerPreference: quality.constrained ? "default" : "high-performance",
+      });
+    } catch (error) {
+      console.warn("Unable to initialize the landing WebGL renderer.", error);
+      return undefined;
+    }
     renderer.outputColorSpace = THREE.SRGBColorSpace;
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
     renderer.toneMappingExposure = theme === "light" ? 1 : 1.06;

@@ -541,9 +541,24 @@ class _RemoteHubSession:
     host_user_id: int
     host_user_name: str
     device_name: str = ""
+    hub_type: str = ""
+    firmware_version: str = ""
+    protocol_version: str = ""
     transport: str = ""
     transport_label: str = ""
     hub_running: bool = False
+    battery_state: str = "unknown"
+    battery_voltage: Optional[int] = None
+    battery_percent: Optional[int] = None
+    ports: List[Dict[str, Any]] = field(default_factory=list)
+    telemetry_available: bool = False
+    telemetry_error: str = ""
+    max_user_program_size: int = 0
+    num_of_slots: int = 0
+    selected_slot: int = 0
+    warnings: List[str] = field(default_factory=list)
+    motion: Optional[Dict[str, Any]] = None
+    buttons: List[str] = field(default_factory=list)
     guests: Dict[int, str] = field(default_factory=dict)
     pending: Dict[int, _RemoteHubAccessRequest] = field(default_factory=dict)
 
@@ -808,6 +823,7 @@ def _serialize_user(db: Session, viewer_id: Optional[int], user: models.User) ->
     return schemas.UserOut(
         id=user.id,
         username=user.username,
+        created_at=user.created_at,
         display_name=user.display_name,
         is_admin=user.is_admin,
         is_banned=user.is_banned,
@@ -841,6 +857,7 @@ def _serialize_users(db: Session, viewer_id: Optional[int], users: List[models.U
             schemas.UserOut(
                 id=user.id,
                 username=user.username,
+                created_at=user.created_at,
                 display_name=user.display_name,
                 is_admin=user.is_admin,
                 is_banned=user.is_banned,
@@ -2385,6 +2402,33 @@ def _delete_user_account(db: Session, user: models.User):
 
 # --- Admin Routes ---
 
+@app.get("/admin/api/stats", response_model=schemas.AdminStatsOut)
+@app.get("/admin/stats", response_model=schemas.AdminStatsOut)
+def admin_stats(current_user: models.User = Depends(check_admin), db: Session = Depends(get_db)):
+    week_ago = dt.datetime.utcnow() - dt.timedelta(days=7)
+
+    def count(model, *filters):
+        query = db.query(func.count()).select_from(model)
+        if filters:
+            query = query.filter(*filters)
+        return int(query.scalar() or 0)
+
+    return schemas.AdminStatsOut(
+        total_users=count(models.User),
+        admins=count(models.User, models.User.is_admin == True),
+        banned_users=count(models.User, models.User.is_banned == True),
+        online_users=count(models.Presence, models.Presence.status == "online"),
+        new_users_7d=count(models.User, models.User.created_at >= week_ago),
+        total_projects=count(models.Project),
+        public_projects=count(models.Project, models.Project.is_public == True),
+        pybricks_projects=count(models.Project, models.Project.project_type == "pybricks"),
+        new_projects_7d=count(models.Project, models.Project.created_at >= week_ago),
+        total_files=count(models.ProjectFile),
+        total_conversations=count(models.Conversation),
+        total_messages=count(models.Message),
+        total_follows=count(models.Follow),
+    )
+
 @app.get("/admin/api/users", response_model=List[schemas.AdminUserOut])
 @app.get("/admin/users", response_model=List[schemas.AdminUserOut])
 def admin_list_users(current_user: models.User = Depends(check_admin), db: Session = Depends(get_db)):
@@ -2397,6 +2441,12 @@ async def admin_update_user(user_id: int, user_in: schemas.AdminUserUpdate, curr
     if not user:
         raise HTTPException(status_code=404, detail="User not found")
     should_disconnect = False
+    if user_in.is_admin is not None and user_in.is_admin != user.is_admin:
+        if user.id == current_user.id:
+            raise HTTPException(status_code=400, detail="Cannot change your own admin status")
+        if user.username == "adam":
+            raise HTTPException(status_code=400, detail="Cannot change the protected admin account")
+        user.is_admin = user_in.is_admin
     if user_in.username is not None:
         user.username = user_in.username
     if user_in.display_name is not None:
@@ -2856,6 +2906,7 @@ def _to_user_me_out(user: models.User) -> schemas.UserMeOut:
     return schemas.UserMeOut(
         id=user.id,
         username=user.username,
+        created_at=user.created_at,
         display_name=user.display_name,
         is_admin=user.is_admin,
         is_banned=user.is_banned,
@@ -4321,6 +4372,78 @@ def _voice_participants_payload(project_id: int) -> List[Dict[str, Any]]:
     return participants
 
 
+def _coerce_nonnegative_int(value: Any) -> int:
+    try:
+        return max(0, int(value or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _sanitize_remote_hub_ports(value: Any) -> List[Dict[str, Any]]:
+    if not isinstance(value, list):
+        return []
+    ports: List[Dict[str, Any]] = []
+    for raw in value[:8]:
+        if not isinstance(raw, dict):
+            continue
+        port = {
+            "port": str(raw.get("port") or "")[:2],
+            "kind": str(raw.get("kind") or "empty")[:16],
+            "device": str(raw.get("device") or "")[:64],
+        }
+        for key in ("deviceId", "angle", "speed", "reflection", "distance", "force", "ambient"):
+            number = raw.get(key)
+            if isinstance(number, (int, float)) and not isinstance(number, bool):
+                port[key] = number
+        for key in ("color", "mode"):
+            text = raw.get(key)
+            if isinstance(text, str):
+                port[key] = text[:64]
+        if isinstance(raw.get("pressed"), bool):
+            port["pressed"] = raw["pressed"]
+        for key in ("hsv", "value"):
+            sequence = raw.get(key)
+            if isinstance(sequence, list):
+                port[key] = [
+                    item
+                    for item in sequence[:8]
+                    if isinstance(item, (int, float, str)) and not isinstance(item, bool)
+                ]
+        ports.append(port)
+    return ports
+
+
+def _sanitize_remote_hub_motion(value: Any) -> Optional[Dict[str, Any]]:
+    if not isinstance(value, dict):
+        return None
+
+    def numbers(seq: Any, count: int) -> Optional[List[float]]:
+        if not isinstance(seq, list):
+            return None
+        return [
+            item
+            for item in seq[:count]
+            if isinstance(item, (int, float)) and not isinstance(item, bool)
+        ]
+
+    up = value.get("up")
+    heading = value.get("heading")
+    return {
+        "up": up[:16] if isinstance(up, str) else None,
+        "tilt": numbers(value.get("tilt"), 2),
+        "heading": heading if isinstance(heading, (int, float)) and not isinstance(heading, bool) else None,
+        "acceleration": numbers(value.get("acceleration"), 3),
+        "angularVelocity": numbers(value.get("angularVelocity"), 3),
+        "stationary": bool(value.get("stationary")),
+    }
+
+
+def _sanitize_remote_hub_buttons(value: Any) -> List[str]:
+    if not isinstance(value, list):
+        return []
+    return [str(item)[:16] for item in value[:6] if isinstance(item, str) and item.strip()]
+
+
 def _remote_hub_public_payload(project_id: int) -> Optional[Dict[str, Any]]:
     session = _remote_hub_sessions.get(project_id)
     if not session:
@@ -4347,9 +4470,24 @@ def _remote_hub_public_payload(project_id: int) -> Optional[Dict[str, Any]]:
             "userId": session.host_user_id,
             "userName": session.host_user_name,
             "deviceName": session.device_name,
+            "hubType": session.hub_type,
+            "firmwareVersion": session.firmware_version,
+            "protocolVersion": session.protocol_version,
             "transport": session.transport,
             "transportLabel": session.transport_label,
             "hubRunning": session.hub_running,
+            "batteryState": session.battery_state,
+            "batteryVoltage": session.battery_voltage,
+            "batteryPercent": session.battery_percent,
+            "ports": session.ports,
+            "motion": session.motion,
+            "buttons": session.buttons,
+            "telemetryAvailable": session.telemetry_available,
+            "telemetryError": session.telemetry_error,
+            "maxUserProgramSize": session.max_user_program_size,
+            "numOfSlots": session.num_of_slots,
+            "selectedSlot": session.selected_slot,
+            "warnings": session.warnings,
         },
         "guests": guests,
         "pendingUserIds": sorted(session.pending.keys()),
@@ -5190,9 +5328,40 @@ async def remote_hub_host_state(sid, data):
     remote_session.host_user_id = int(session["user_id"])
     remote_session.host_user_name = session.get("name") or f"User {session['user_id']}"
     remote_session.device_name = str(data.get("deviceName") or "").strip()
+    remote_session.hub_type = str(data.get("hubType") or "").strip()
+    remote_session.firmware_version = str(data.get("firmwareVersion") or "").strip()
+    remote_session.protocol_version = str(data.get("protocolVersion") or "").strip()
     remote_session.transport = str(data.get("transport") or "").strip()
     remote_session.transport_label = str(data.get("transportLabel") or "").strip()
     remote_session.hub_running = bool(data.get("hubRunning"))
+    battery_state = str(data.get("batteryState") or "unknown").strip()
+    remote_session.battery_state = (
+        battery_state
+        if battery_state in {"unknown", "ok", "low", "critical", "high-current"}
+        else "unknown"
+    )
+    battery_voltage = data.get("batteryVoltage")
+    remote_session.battery_voltage = (
+        _coerce_nonnegative_int(battery_voltage) if battery_voltage is not None else None
+    )
+    battery_percent = data.get("batteryPercent")
+    remote_session.battery_percent = (
+        min(100, _coerce_nonnegative_int(battery_percent)) if battery_percent is not None else None
+    )
+    remote_session.ports = _sanitize_remote_hub_ports(data.get("ports"))
+    remote_session.motion = _sanitize_remote_hub_motion(data.get("motion"))
+    remote_session.buttons = _sanitize_remote_hub_buttons(data.get("buttons"))
+    remote_session.telemetry_available = bool(data.get("telemetryAvailable"))
+    remote_session.telemetry_error = str(data.get("telemetryError") or "").strip()[:160]
+    remote_session.max_user_program_size = _coerce_nonnegative_int(data.get("maxUserProgramSize"))
+    remote_session.num_of_slots = _coerce_nonnegative_int(data.get("numOfSlots"))
+    remote_session.selected_slot = _coerce_nonnegative_int(data.get("selectedSlot"))
+    warnings = data.get("warnings")
+    remote_session.warnings = (
+        [str(warning).strip() for warning in warnings[:4] if str(warning).strip()]
+        if isinstance(warnings, list)
+        else []
+    )
     _remote_hub_sessions[pid] = remote_session
     await _broadcast_remote_hub_state(pid)
 

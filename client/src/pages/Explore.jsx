@@ -1,13 +1,41 @@
 import { useState, useEffect, useMemo } from "react";
-import api from "../api";
+import api, { API_BASE } from "../api";
 import { FiSearch, FiUser, FiCode, FiArrowRight } from "react-icons/fi";
 import { useNavigate } from "react-router-dom";
 import { motion } from "framer-motion";
 import VerifiedBadge from "../components/VerifiedBadge";
 import CommandPalette from "../components/CommandPalette";
+import { Skeleton, SkeletonText } from "../components/Skeleton";
+import { skeletonDebugEnabled } from "../utils/skeletonDebug";
 import { toProfilePath } from "../utils/profileLinks";
 import { toProjectPath } from "../projects/projectPaths";
-import { resolveHostedAssetUrl } from "../utils/hostedAssets";
+
+function UserResultSkeleton() {
+    return (
+        <div className="panel user-card skeleton-card" aria-hidden="true">
+            <Skeleton className="user-avatar-lg" rounded />
+            <div className="skeleton-result-copy">
+                <Skeleton className="skeleton-heading-line" />
+                <Skeleton className="skeleton-short-line" />
+            </div>
+        </div>
+    );
+}
+
+function ProjectResultSkeleton() {
+    return (
+        <div className="panel project-card skeleton-card" aria-hidden="true">
+            <div>
+                <div className="project-row-main">
+                    <Skeleton className="skeleton-heading-line" />
+                    <Skeleton className="skeleton-icon-button" rounded />
+                </div>
+                <SkeletonText lines={3} />
+            </div>
+            <Skeleton className="skeleton-button" />
+        </div>
+    );
+}
 
 
 export default function Explore() {
@@ -17,6 +45,7 @@ export default function Explore() {
     const [loading, setLoading] = useState(false);
     const [quickOpen, setQuickOpen] = useState(false);
     const navigate = useNavigate();
+    const showSkeletons = skeletonDebugEnabled();
 
     const quickItems = useMemo(() => {
         const userItems = users.slice(0, 8).map((user) => ({
@@ -123,7 +152,16 @@ export default function Explore() {
                         <div className="chip chip-muted">{projects.length} projects</div>
                     </div>
                     <div className="panel-body">
-                        {users.length > 0 && (
+                        {(loading || showSkeletons) && searchTerm && (
+                            <div className="explore-section" aria-label="Loading users">
+                                <div className="section-title muted">Users</div>
+                                <div className="results-grid">
+                                    {Array.from({ length: 3 }).map((_, index) => <UserResultSkeleton key={index} />)}
+                                </div>
+                            </div>
+                        )}
+
+                        {!loading && !showSkeletons && users.length > 0 && (
                             <div className="explore-section">
                                 <div className="section-title muted">Users</div>
                                 <div className="results-grid">
@@ -139,7 +177,7 @@ export default function Explore() {
                                         >
                                             <div className="user-avatar-lg">
                                                 {u.profile_picture_path ? (
-                                                    <img src={resolveHostedAssetUrl(u.profile_picture_path)} alt={u.display_name} />
+                                                    <img src={u.profile_picture_path.startsWith("http") || u.profile_picture_path.startsWith("data:") ? u.profile_picture_path : `${API_BASE}${u.profile_picture_path}`} alt={u.display_name} />
                                                 ) : (
                                                     <div className="user-avatar-fallback">
                                                         <FiUser />
@@ -162,7 +200,9 @@ export default function Explore() {
                         <div className="explore-section">
                             <div className="section-title muted">{searchTerm ? "Projects" : "Trending Projects"}</div>
                             <div className="results-grid">
-                                {projects.map((p, i) => (
+                                {loading || showSkeletons
+                                  ? Array.from({ length: 6 }).map((_, index) => <ProjectResultSkeleton key={index} />)
+                                  : projects.map((p, i) => (
                                     <motion.div
                                         key={p.id}
                                         className="panel project-card"

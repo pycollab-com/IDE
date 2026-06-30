@@ -41,9 +41,25 @@ async def test_remote_hub_host_state_creates_and_clears_session(monkeypatch):
             "projectId": 7,
             "connected": True,
             "deviceName": "LEGO Hub 12A3",
+            "hubType": "Prime Hub",
+            "firmwareVersion": "3.6.1",
+            "protocolVersion": "1.5.0",
             "transport": "bluetooth",
             "transportLabel": "Bluetooth",
             "hubRunning": False,
+            "batteryState": "low",
+            "batteryVoltage": 7412,
+            "batteryPercent": 59,
+            "ports": [
+                {"port": "A", "kind": "motor", "device": "SPIKE M Motor", "angle": 123, "speed": 0},
+                {"port": "B", "kind": "color", "device": "Color Sensor", "color": "RED", "hsv": [350, 90, 70]},
+            ],
+            "telemetryAvailable": True,
+            "telemetryError": "",
+            "maxUserProgramSize": 262144,
+            "numOfSlots": 8,
+            "selectedSlot": 2,
+            "warnings": ["Low Bluetooth signal"],
         },
     )
 
@@ -51,15 +67,45 @@ async def test_remote_hub_host_state_creates_and_clears_session(monkeypatch):
     session = main._remote_hub_sessions[7]
     assert session.host_user_id == 11
     assert session.device_name == "LEGO Hub 12A3"
+    assert session.hub_type == "Prime Hub"
+    assert session.firmware_version == "3.6.1"
+    assert session.protocol_version == "1.5.0"
+    assert session.battery_state == "low"
+    assert session.battery_voltage == 7412
+    assert session.battery_percent == 59
+    assert session.ports[0]["angle"] == 123
+    assert session.telemetry_available is True
+    assert session.max_user_program_size == 262144
+    assert session.num_of_slots == 8
+    assert session.selected_slot == 2
+    assert session.warnings == ["Low Bluetooth signal"]
 
     state_events = [event for event in emitted if event[0] == "remote_hub_state"]
     assert state_events[-1][1]["session"]["host"] == {
         "userId": 11,
         "userName": "Alex",
         "deviceName": "LEGO Hub 12A3",
+        "hubType": "Prime Hub",
+        "firmwareVersion": "3.6.1",
+        "protocolVersion": "1.5.0",
         "transport": "bluetooth",
         "transportLabel": "Bluetooth",
         "hubRunning": False,
+        "batteryState": "low",
+        "batteryVoltage": 7412,
+        "batteryPercent": 59,
+        "ports": [
+            {"port": "A", "kind": "motor", "device": "SPIKE M Motor", "angle": 123, "speed": 0},
+            {"port": "B", "kind": "color", "device": "Color Sensor", "color": "RED", "hsv": [350, 90, 70]},
+        ],
+        "motion": None,
+        "buttons": [],
+        "telemetryAvailable": True,
+        "telemetryError": "",
+        "maxUserProgramSize": 262144,
+        "numOfSlots": 8,
+        "selectedSlot": 2,
+        "warnings": ["Low Bluetooth signal"],
     }
     assert state_events[-1][2] == "project_7"
 
@@ -69,6 +115,93 @@ async def test_remote_hub_host_state_creates_and_clears_session(monkeypatch):
     assert 7 not in main._remote_hub_sessions
     state_events = [event for event in emitted if event[0] == "remote_hub_state"]
     assert state_events[-1][1]["session"] is None
+
+
+@pytest.mark.asyncio
+async def test_remote_hub_host_state_broadcasts_battery_updates(monkeypatch):
+    emitted = []
+
+    async def fake_emit(event, data, room=None, skip_sid=None):
+        emitted.append((event, data, room, skip_sid))
+
+    monkeypatch.setattr(main.sio, "emit", fake_emit)
+    main._sid_info["sid_host"] = {
+        "user_id": 12,
+        "is_admin": False,
+        "project_id": 9,
+        "can_edit": True,
+        "name": "Host",
+    }
+
+    await main.remote_hub_host_state(
+        "sid_host",
+        {
+            "projectId": 9,
+            "connected": True,
+            "deviceName": "Prime",
+            "batteryState": "ok",
+        },
+    )
+    emitted.clear()
+
+    await main.remote_hub_host_state(
+        "sid_host",
+        {
+            "projectId": 9,
+            "connected": True,
+            "deviceName": "Prime",
+            "batteryState": "critical",
+            "warnings": ["Hub shutting down"],
+        },
+    )
+
+    state_events = [event for event in emitted if event[0] == "remote_hub_state"]
+    assert state_events[-1][1]["session"]["host"]["batteryState"] == "critical"
+    assert state_events[-1][1]["session"]["host"]["warnings"] == ["Hub shutting down"]
+    assert state_events[-1][2] == "project_9"
+
+
+@pytest.mark.asyncio
+async def test_remote_hub_host_state_relays_motion_and_buttons(monkeypatch):
+    emitted = []
+
+    async def fake_emit(event, data, room=None, skip_sid=None):
+        emitted.append((event, data, room, skip_sid))
+
+    monkeypatch.setattr(main.sio, "emit", fake_emit)
+    main._sid_info["sid_host"] = {
+        "user_id": 13,
+        "is_admin": False,
+        "project_id": 10,
+        "can_edit": True,
+        "name": "Host",
+    }
+
+    await main.remote_hub_host_state(
+        "sid_host",
+        {
+            "projectId": 10,
+            "connected": True,
+            "deviceName": "Prime",
+            "motion": {
+                "up": "TOP",
+                "tilt": [3, -2],
+                "heading": 142,
+                "acceleration": [10, -5, 980],
+                "angularVelocity": [1, 0, -1],
+                "stationary": True,
+                "bogus": "dropped",
+            },
+            "buttons": ["CENTER", "LEFT", 5, ""],
+        },
+    )
+
+    host = [event for event in emitted if event[0] == "remote_hub_state"][-1][1]["session"]["host"]
+    assert host["motion"]["up"] == "TOP"
+    assert host["motion"]["tilt"] == [3, -2]
+    assert host["motion"]["stationary"] is True
+    assert "bogus" not in host["motion"]
+    assert host["buttons"] == ["CENTER", "LEFT"]
 
 
 @pytest.mark.asyncio
