@@ -1,5 +1,5 @@
 import { useState, useEffect } from "react";
-import api from "../api";
+import api, { API_BASE } from "../api";
 import { resolveProfileId, toProfilePath } from "../utils/profileLinks";
 import { parseSocialLink } from "../utils/socialLinks";
 import { useParams, useNavigate, Link, useLocation } from "react-router-dom";
@@ -38,7 +38,6 @@ import { SiBuymeacoffee } from "react-icons/si";
 import { motion, AnimatePresence } from "framer-motion";
 import VerifiedBadge from "../components/VerifiedBadge";
 import { toProjectPath } from "../projects/projectPaths";
-import { resolveHostedAssetUrl } from "../utils/hostedAssets";
 
 const SOCIAL_ICON_MAP = {
     github: FaGithub,
@@ -100,22 +99,21 @@ function FaviconWithFallback({ link }) {
 }
 
 const formatJoinedDate = (createdAt) => {
-    if (!createdAt) return "Joined recently";
-    const tryParse = (value) => {
-        const parsed = new Date(value);
-        return Number.isNaN(parsed.getTime()) ? null : parsed;
-    };
-    const direct = tryParse(createdAt);
-    if (direct) {
-        return `Joined ${direct.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" })}`;
+    if (!createdAt) return "Joined --/--/----";
+
+    const dateOnlyMatch = String(createdAt).match(/^(\d{4})-(\d{1,2})-(\d{1,2})/);
+    if (dateOnlyMatch) {
+        const [, year, month, day] = dateOnlyMatch;
+        return `Joined ${day.padStart(2, "0")}/${month.padStart(2, "0")}/${year}`;
     }
-    if (typeof createdAt === "string") {
-        const normalized = tryParse(createdAt.replace(" ", "T"));
-        if (normalized) {
-            return `Joined ${normalized.toLocaleDateString([], { year: "numeric", month: "short", day: "numeric" })}`;
-        }
-    }
-    return "Joined recently";
+
+    const parsed = new Date(createdAt);
+    if (Number.isNaN(parsed.getTime())) return "Joined --/--/----";
+
+    const day = String(parsed.getUTCDate()).padStart(2, "0");
+    const month = String(parsed.getUTCMonth() + 1).padStart(2, "0");
+    const year = parsed.getUTCFullYear();
+    return `Joined ${day}/${month}/${year}`;
 };
 
 export default function Profile({ user: currentUser }) {
@@ -233,7 +231,9 @@ export default function Profile({ user: currentUser }) {
     if (!profileUser) return <div className="container page-shell" style={{ textAlign: 'center' }}>User not found</div>;
 
     const pfpUrl = profileUser.profile_picture_path
-        ? resolveHostedAssetUrl(profileUser.profile_picture_path)
+        ? (profileUser.profile_picture_path.startsWith("http") || profileUser.profile_picture_path.startsWith("data:")
+            ? profileUser.profile_picture_path
+            : `${API_BASE}${profileUser.profile_picture_path}`)
         : null;
     const isFounderProfile = (profileUser.username || "").toLowerCase() === "adam";
     const joinedLabel = formatJoinedDate(profileUser.created_at);
@@ -306,7 +306,7 @@ export default function Profile({ user: currentUser }) {
                                             <div className="profile-modal-avatar">
                                                 {u.profile_picture_path ? (
                                                     <img
-                                                        src={resolveHostedAssetUrl(u.profile_picture_path)}
+                                                        src={u.profile_picture_path.startsWith("http") || u.profile_picture_path.startsWith("data:") ? u.profile_picture_path : `${API_BASE}${u.profile_picture_path}`}
                                                         alt={u.display_name}
                                                     />
                                                 ) : (

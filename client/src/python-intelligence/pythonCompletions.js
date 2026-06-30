@@ -5,9 +5,10 @@
 // inserted, what shape a call takes, how things rank — testable in isolation and
 // identical for every symbol, not just the handful anyone happened to try.
 //
-// A descriptor is `{ label, detail, type, boost, template? }`. When `template`
-// is present the editor inserts it as a tab-through snippet; otherwise the label
-// is inserted verbatim.
+// A descriptor is `{ label, detail, type, boost, template?, apply? }`. When
+// `template` is present the editor inserts it as a tab-through snippet; when
+// `apply` is present it inserts that exact text; otherwise the label is inserted
+// verbatim.
 
 // Keyword snippets only ever surface at the start of a statement (see the
 // caller's `allowSnippets` gate), and always sit below real symbols.
@@ -226,9 +227,12 @@ function conciseDetail(name, item) {
 // Rows stay terse on purpose — the arity label (`Motor(port, gears)`) already
 // communicates the parameters, so callables carry no inline detail and no doc
 // panel. Types show up in the slim signature hint while you fill the call.
-export function toCompletionDescriptors(item, { importOrDef } = {}) {
+export function toCompletionDescriptors(item, { importOrDef, importContext = "" } = {}) {
   const label = item.label || item.name || "";
   if (!label) {
+    return [];
+  }
+  if (importContext === "from-import" && (item.name === "*" || label === "*")) {
     return [];
   }
 
@@ -247,14 +251,17 @@ export function toCompletionDescriptors(item, { importOrDef } = {}) {
     }));
   }
 
-  return [
-    {
-      label,
-      detail: conciseDetail(label, item),
-      type: mapCompletionType(item.kind, label),
-      boost: completionBoost(item.kind, label),
-    },
-  ];
+  const descriptor = {
+    label,
+    filterText: item.name || label,
+    detail: conciseDetail(label, item),
+    type: mapCompletionType(item.kind, label),
+    boost: completionBoost(item.kind, label),
+  };
+  if (importContext) {
+    descriptor.apply = item.name || label;
+  }
+  return [descriptor];
 }
 
 // Keyword arguments already written in a call's argument text, so the comma
@@ -315,11 +322,12 @@ export function buildCompletionOptions({
   typedPrefix = "",
   isPybricksProject = false,
   importOrDef = false,
+  importContext = "",
   allowSnippets = false,
 }) {
   const symbols = (Array.isArray(items) ? items : [])
     .filter((item) => !shouldHideCompletion(item, typedPrefix, isPybricksProject))
-    .flatMap((item) => toCompletionDescriptors(item, { importOrDef }));
+    .flatMap((item) => toCompletionDescriptors(item, { importOrDef, importContext }));
 
   return dedupeByLabel([...(allowSnippets ? SNIPPET_DESCRIPTORS : []), ...symbols]);
 }

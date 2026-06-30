@@ -12,12 +12,36 @@ import { motion, AnimatePresence } from "framer-motion";
 import VerifiedBadge from "../components/VerifiedBadge";
 import { toProjectPath } from "../projects/projectPaths";
 
+const getAdminTimeZone = () => {
+    try {
+        return Intl.DateTimeFormat().resolvedOptions().timeZone || "Asia/Singapore";
+    } catch {
+        return "Asia/Singapore";
+    }
+};
+
+const parseServerDateTime = (value) => {
+    if (!value) return null;
+    const normalized = typeof value === "string" && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(value)
+        ? `${value.replace(" ", "T")}Z`
+        : value;
+    const parsed = new Date(normalized);
+    return Number.isNaN(parsed.getTime()) ? null : parsed;
+};
 
 const formatDate = (isoString) => {
     if (!isoString) return "-";
-    const date = new Date(isoString);
-    return date.toLocaleDateString(undefined, { year: "numeric", month: "short", day: "numeric" })
-        + " " + date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+    const parsed = parseServerDateTime(isoString);
+    if (!parsed) return "-";
+    return new Intl.DateTimeFormat("en-GB", {
+        timeZone: getAdminTimeZone(),
+        day: "2-digit",
+        month: "2-digit",
+        year: "numeric",
+        hour: "2-digit",
+        minute: "2-digit",
+        hour12: true,
+    }).format(parsed).toLowerCase();
 };
 
 const formatNumber = (value) => (value ?? 0).toLocaleString();
@@ -339,8 +363,8 @@ export default function AdminPage({ user }) {
                 case "id-desc": return b.id - a.id;
                 case "name-asc": return (a.display_name || "").localeCompare(b.display_name || "");
                 case "name-desc": return (b.display_name || "").localeCompare(a.display_name || "");
-                case "created-asc": return new Date(a.created_at || 0) - new Date(b.created_at || 0);
-                case "created-desc": return new Date(b.created_at || 0) - new Date(a.created_at || 0);
+                case "created-asc": return (parseServerDateTime(a.created_at)?.getTime() || 0) - (parseServerDateTime(b.created_at)?.getTime() || 0);
+                case "created-desc": return (parseServerDateTime(b.created_at)?.getTime() || 0) - (parseServerDateTime(a.created_at)?.getTime() || 0);
                 default: return 0;
             }
         });

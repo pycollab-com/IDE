@@ -823,6 +823,7 @@ def _serialize_user(db: Session, viewer_id: Optional[int], user: models.User) ->
     return schemas.UserOut(
         id=user.id,
         username=user.username,
+        created_at=user.created_at,
         display_name=user.display_name,
         is_admin=user.is_admin,
         is_banned=user.is_banned,
@@ -856,6 +857,7 @@ def _serialize_users(db: Session, viewer_id: Optional[int], users: List[models.U
             schemas.UserOut(
                 id=user.id,
                 username=user.username,
+                created_at=user.created_at,
                 display_name=user.display_name,
                 is_admin=user.is_admin,
                 is_banned=user.is_banned,
@@ -2904,6 +2906,7 @@ def _to_user_me_out(user: models.User) -> schemas.UserMeOut:
     return schemas.UserMeOut(
         id=user.id,
         username=user.username,
+        created_at=user.created_at,
         display_name=user.display_name,
         is_admin=user.is_admin,
         is_banned=user.is_banned,

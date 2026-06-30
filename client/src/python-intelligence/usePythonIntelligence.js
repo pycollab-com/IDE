@@ -67,6 +67,17 @@ function isImportOrDefinitionContext(doc, pos) {
   return false;
 }
 
+function getImportCompletionContext(doc, pos) {
+  const prefix = getLinePrefix(doc, pos);
+  if (/^\s*from\s+[\w.]+\s+import\s+[^#]*$/.test(prefix)) {
+    return "from-import";
+  }
+  if (/^\s*import\s+[^#]*$/.test(prefix)) {
+    return "import";
+  }
+  return "";
+}
+
 // A descriptor carries a `template` only when it should be inserted as a
 // tab-through snippet; everything else is inserted verbatim. Completion rows
 // stay lean — no doc panel — so the list reads as autocomplete, not an essay.
@@ -376,7 +387,8 @@ function createCompletionSource(service, getProjectState) {
       }
     }
 
-    const importOrDef = isImportOrDefinitionContext(doc, cursorPos);
+    const importContext = getImportCompletionContext(doc, cursorPos);
+    const importOrDef = Boolean(importContext) || isImportOrDefinitionContext(doc, cursorPos);
     const options = [
       ...keywordOptions,
       ...buildCompletionOptions({
@@ -384,6 +396,7 @@ function createCompletionSource(service, getProjectState) {
         typedPrefix: token?.text || "",
         isPybricksProject: snapshot.isPybricksProject,
         importOrDef,
+        importContext,
         allowSnippets: !isMemberAccess && !callContext.inCall && !importOrDef,
       }),
     ].map(descriptorToCompletion);

@@ -24,6 +24,7 @@ class PinAuth(BaseModel):
 class UserOut(BaseModel):
     id: int
     username: str
+    created_at: datetime
     display_name: str
     is_admin: bool = False
     is_banned: bool = False

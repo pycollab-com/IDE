@@ -1,11 +1,14 @@
 import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import { useNavigate, useParams, useSearchParams } from "react-router-dom";
 import CodeMirror, { ExternalChange } from "@uiw/react-codemirror";
+import { completionStatus } from "@codemirror/autocomplete";
 import { python } from "@codemirror/lang-python";
-import { EditorView, Decoration, WidgetType } from "@codemirror/view";
-import { ChangeSet, StateEffect, StateField } from "@codemirror/state";
+import { codeFolding, foldEffect, foldable, foldedRanges, indentUnit, unfoldEffect } from "@codemirror/language";
+import { insertNewlineAndIndent, indentWithTab } from "@codemirror/commands";
+import { EditorView, Decoration, GutterMarker, WidgetType, gutter, keymap } from "@codemirror/view";
+import { ChangeSet, EditorState, Prec, StateEffect, StateField } from "@codemirror/state";
 import { io } from "socket.io-client";
-import api, { API_BASE, HOSTED_WEB_BASE } from "../api";
+import api, { API_BASE } from "../api";
 import { getToken } from "../auth";
 import { freezeSerializable } from "../session";
 import PyodideRunner from "../runtime/pyodideRunner";
@@ -17,13 +20,76 @@ import { FiFile, FiFilePlus, FiFolder, FiFolderPlus, FiUsers, FiShare2, FiLogOut
 import CommandPalette from "../components/CommandPalette";
 import ProjectSearch from "../components/ProjectSearch";
 import CheckpointInspectorModal from "../components/CheckpointInspectorModal";
+import { Skeleton } from "../components/Skeleton";
+import { skeletonDebugEnabled } from "../utils/skeletonDebug";
 import PybricksLiveControl from "../components/PybricksLiveControl";
 import HubInfoPanel from "../components/HubInfoPanel";
 import { getPrimaryReading } from "../runtime/pybricksReadings";
 import { usePythonIntelligence } from "../python-intelligence/usePythonIntelligence";
 import { PROJECT_TYPE_PYBRICKS, isPybricksProject as projectUsesPybricks } from "../projects/projectTypes";
-import { copyText } from "../utils/clipboard";
-import { resolveHostedAssetUrl } from "../utils/hostedAssets";
+
+const PYTHON_INDENT = "    ";
+
+const lineIndent = (text) => text.match(/^[ \t]*/)?.[0].replace(/\t/g, PYTHON_INDENT) || "";
+
+const codeBeforeComment = (text) => text.replace(/\s+#.*$/, "").trimEnd();
+
+const shouldOpenPythonBlock = (text) => codeBeforeComment(text).endsWith(":");
+
+const autocompleteIsOpen = (view) => completionStatus(view.state) !== null;
+
+const insertPythonNewlineAndIndent = (view) => {
+  if (autocompleteIsOpen(view)) return false;
+
+  const selection = view.state.selection;
+  if (selection.ranges.length !== 1 || !selection.main.empty) {
+    return insertNewlineAndIndent(view);
+  }
+
+  const cursor = selection.main.head;
+  const line = view.state.doc.lineAt(cursor);
+  const beforeCursor = line.text.slice(0, cursor - line.from);
+  const currentIndent = lineIndent(beforeCursor);
+  const isBlankIndentedLine = line.text.trim() === "" && currentIndent.length > 0;
+  const indent = isBlankIndentedLine
+    ? currentIndent.slice(0, Math.max(0, currentIndent.length - PYTHON_INDENT.length))
+    : currentIndent + (shouldOpenPythonBlock(beforeCursor) ? PYTHON_INDENT : "");
+
+  view.dispatch({
+    changes: {
+      from: cursor,
+      to: cursor,
+      insert: `\n${indent}`,
+    },
+    selection: { anchor: cursor + 1 + indent.length },
+    userEvent: "input",
+  });
+  return true;
+};
+
+const escapePythonIndent = (view) => {
+  if (autocompleteIsOpen(view)) return false;
+
+  const selection = view.state.selection;
+  if (selection.ranges.length !== 1 || !selection.main.empty) return false;
+
+  const cursor = selection.main.head;
+  const line = view.state.doc.lineAt(cursor);
+  const currentIndent = lineIndent(line.text);
+  if (!currentIndent) return false;
+
+  const cursorOffset = cursor - line.from;
+  const removeTo = line.from + Math.min(currentIndent.length, cursorOffset);
+  const removeFrom = Math.max(line.from, removeTo - PYTHON_INDENT.length);
+  if (removeFrom === removeTo) return false;
+
+  view.dispatch({
+    changes: { from: removeFrom, to: removeTo },
+    selection: { anchor: cursor - (removeTo - removeFrom) },
+    userEvent: "delete.dedent",
+  });
+  return true;
+};
 
 
 // Subsequence fuzzy match for the Cmd/Ctrl+K file switcher.
@@ -69,7 +135,7 @@ const remoteCursorField = StateField.define({
             );
           }
         });
-        value = Decoration.set(decorations);
+        value = Decoration.set(decorations, true);
       }
     }
     return value;
@@ -110,6 +176,69 @@ class RemoteCursorWidget extends WidgetType {
     return wrap;
   }
 }
+
+const getFoldedRangeAtLine = (state, line) => {
+  let folded = null;
+  foldedRanges(state).between(line.from, line.to, (from, to) => {
+    if (!folded || folded.from > from) folded = { from, to };
+  });
+  return folded;
+};
+
+class CodeFoldingRibbonMarker extends GutterMarker {
+  constructor(lines, folded) {
+    super();
+    this.lines = lines;
+    this.folded = folded;
+  }
+
+  eq(other) {
+    return other.lines === this.lines && other.folded === this.folded;
+  }
+
+  toDOM() {
+    const marker = document.createElement("button");
+    marker.type = "button";
+    marker.className = `cm-code-fold-ribbon${this.folded ? " is-folded" : ""}`;
+    marker.style.setProperty("--fold-ribbon-lines", String(this.lines));
+    marker.setAttribute("aria-label", this.folded ? "Expand folded code" : "Collapse code block");
+    marker.title = this.folded ? "Expand" : "Collapse";
+
+    const rail = document.createElement("span");
+    rail.className = "cm-code-fold-ribbon-rail";
+    marker.appendChild(rail);
+    return marker;
+  }
+}
+
+const codeFoldingRibbon = gutter({
+  class: "cm-code-fold-ribbon-gutter",
+  lineMarker(view, line) {
+    const foldedRange = getFoldedRangeAtLine(view.state, line);
+    const range = foldable(view.state, line.from, line.to);
+    if (!foldedRange && !range) return null;
+
+    const endLine = view.state.doc.lineAt((foldedRange || range).to);
+    const lineCount = Math.max(2, endLine.number - line.number + 1);
+    return new CodeFoldingRibbonMarker(lineCount, Boolean(foldedRange));
+  },
+  domEventHandlers: {
+    mousedown(view, line, event) {
+      if (!(event.target instanceof Element) || !event.target.closest(".cm-code-fold-ribbon")) return false;
+      event.preventDefault();
+      const foldedRange = getFoldedRangeAtLine(view.state, line);
+      const range = foldedRange || foldable(view.state, line.from, line.to);
+      if (!range) return true;
+      view.dispatch({
+        effects: foldedRange ? unfoldEffect.of(foldedRange) : foldEffect.of(range),
+        selection: { anchor: line.from },
+        scrollIntoView: false,
+      });
+      view.focus();
+      return true;
+    },
+  },
+});
 
 const makeOpId = () => {
   if (typeof crypto !== "undefined" && typeof crypto.randomUUID === "function") {
@@ -494,6 +623,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   }, []);
 
   const [project, setProject] = useState(null);
+  const [projectLoading, setProjectLoading] = useState(true);
   const [files, setFiles] = useState([]);
   const [folders, setFolders] = useState([]);
   const [blockDocuments, setBlockDocuments] = useState([]);
@@ -1411,6 +1541,8 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   const [canEdit, setCanEdit] = useState(false);
   const isViewerMode = !canEdit;
   const projectPermissions = project?.permissions || EMPTY_PROJECT_PERMISSIONS;
+  const editorDisconnected = !wsConnected;
+  const editorCanEdit = canEdit && !editorDisconnected;
 
   useEffect(() => {
     projectApiIdRef.current = projectApiId;
@@ -1443,6 +1575,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   }, [socketProjectId, shareToken, ghostMode]);
 
   const loadProject = async () => {
+    setProjectLoading(true);
     try {
       const res = shareToken
         ? await api.post(`/projects/access/${shareToken}`)
@@ -1495,6 +1628,8 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
       if (err.response?.status === 403 || err.response?.status === 404) {
         navigate("/");
       }
+    } finally {
+      setProjectLoading(false);
     }
   };
 
@@ -2218,11 +2353,8 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     };
   }, [socket]);
 
-  const handleReconnect = () => {
-    if (!socketRef.current) return;
-    socketRef.current.disconnect();
-    socketRef.current.connect();
-    lastPongRef.current = Date.now();
+  const handleRefreshEditor = () => {
+    window.location.reload();
   };
 
   const finalizeRunHistoryEntry = ({ runId, returnCode }) => {
@@ -3282,15 +3414,15 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
 
   const copyShareCode = async () => {
     if (!sharePin) return;
-    await copyText(sharePin);
+    await navigator.clipboard.writeText(sharePin);
     setCopiedCode(true);
     setTimeout(() => setCopiedCode(false), 2000);
   };
 
   const copyShareLink = async () => {
     if (!sharePin) return;
-    const shareUrl = `${HOSTED_WEB_BASE}/share/${sharePin}`;
-    await copyText(shareUrl);
+    const shareUrl = `${window.location.origin}/share/${sharePin}`;
+    await navigator.clipboard.writeText(shareUrl);
     setCopiedLink(true);
     setTimeout(() => setCopiedLink(false), 2000);
   };
@@ -3631,7 +3763,16 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
   });
   const extensions = useMemo(
     () => [
+      indentUnit.of(PYTHON_INDENT),
+      EditorState.tabSize.of(PYTHON_INDENT.length),
       python(),
+      codeFolding(),
+      codeFoldingRibbon,
+      keymap.of([indentWithTab]),
+      Prec.highest(keymap.of([
+        { key: "Enter", run: insertPythonNewlineAndIndent },
+        { key: "Escape", run: escapePythonIndent },
+      ])),
       ...pythonIntelligenceExtensions,
       EditorView.lineWrapping,
       remoteCursorField,
@@ -3791,7 +3932,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
     if (person?.avatar) {
       return (
         <img
-          src={resolveHostedAssetUrl(person.avatar)}
+          src={person.avatar.startsWith("http") ? person.avatar : `${API_BASE}${person.avatar}`}
           className={className}
           alt={name}
         />
@@ -4151,6 +4292,8 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         : "Download & Run"
       : "Run Code";
   const mobileRunLabel = running ? "Running" : "Run";
+  const showSkeletons = skeletonDebugEnabled();
+  const editorSkeletonActive = showSkeletons || projectLoading;
 
   const renderEditorTreeEntry = (entry, depth = 0) => {
     const isActive = isEditorEntryActive(entry);
@@ -4355,7 +4498,9 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                 <FiChevronLeft size={18} />
               </button>
               <div className="es-project-heading">
-                <div className="es-project-name">{project?.name || "Untitled project"}</div>
+                <div className="es-project-name">
+                  {editorSkeletonActive ? <Skeleton className="skeleton-editor-title" /> : project?.name || "Untitled project"}
+                </div>
                 <div className="es-project-presence">
                   <span className={`es-presence-dot ${wsConnected ? "online" : ""}`} />
                   <span>{presence.length} online</span>
@@ -4508,8 +4653,18 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                               }
                             }}
                           >
-                            {filteredEditorEntries.map((entry) => renderEditorTreeEntry(entry))}
-                            {filteredEditorEntries.length === 0 && <div className="es-empty">No matching files.</div>}
+                            {editorSkeletonActive ? (
+                              <div className="skeleton-stack skeleton-file-tree">
+                                {Array.from({ length: 8 }).map((_, index) => (
+                                  <Skeleton key={index} className="skeleton-file-row" />
+                                ))}
+                              </div>
+                            ) : (
+                              <>
+                                {filteredEditorEntries.map((entry) => renderEditorTreeEntry(entry))}
+                                {filteredEditorEntries.length === 0 && <div className="es-empty">No matching files.</div>}
+                              </>
+                            )}
                           </div>
                         </div>
                       </motion.div>
@@ -4615,7 +4770,7 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                           <div className="es-pin-row es-pin-link-row">
                             <div className="es-pin-meta">
                               <span className="es-pin-label">Share Link</span>
-                              <span className="es-pin-url">{HOSTED_WEB_BASE}/share/{sharePin}</span>
+                              <span className="es-pin-url">{window.location.origin}/share/{sharePin}</span>
                             </div>
                             <button type="button" className="es-icon-btn" onClick={copyShareLink} title="Copy share link">
                               {copiedLink ? <FiCheck size={14} color="var(--success)" /> : <FiCopy size={14} />}
@@ -4692,15 +4847,25 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                   </div>
                   <div className="editor-file-meta">
                     <div className="editor-file-name">
-                      {isBlockEditorActive ? currentBlockDocument?.name || "Blocks" : currentFile?.name || "No file selected"}
-                      <span className={`editor-file-badge ${isViewerMode ? "viewer" : "editor"}`}>
-                        {isViewerMode ? "Viewer" : "Editable"}
-                      </span>
+                      {editorSkeletonActive ? (
+                        <Skeleton className="skeleton-editor-file-name" />
+                      ) : (
+                        <>
+                          {isBlockEditorActive ? currentBlockDocument?.name || "Blocks" : currentFile?.name || "No file selected"}
+                          <span className={`editor-file-badge ${isViewerMode ? "viewer" : "editor"}`}>
+                            {isViewerMode ? "Viewer" : "Editable"}
+                          </span>
+                        </>
+                      )}
                     </div>
                     <div className="editor-file-path muted">
-                      {isBlockEditorActive
-                        ? `/workspace/${currentBlockDocument?.generated_entry_module || "main.py"}`
-                        : `/root/${currentFile?.name}`}
+                      {editorSkeletonActive ? (
+                        <Skeleton className="skeleton-editor-file-path" />
+                      ) : isBlockEditorActive ? (
+                        `/workspace/${currentBlockDocument?.generated_entry_module || "main.py"}`
+                      ) : (
+                        `/root/${currentFile?.name}`
+                      )}
                     </div>
                   </div>
                 </div>
@@ -5051,12 +5216,18 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                   </span>
                 </div>
               )}
-              {isBlockEditorActive ? (
+              {editorSkeletonActive ? (
+                <div className="editor-code-skeleton editor-code-skeleton-inline" aria-hidden="true">
+                  {Array.from({ length: 18 }).map((_, index) => (
+                    <Skeleton key={index} className="skeleton-code-line" style={{ "--line-index": index }} />
+                  ))}
+                </div>
+              ) : isBlockEditorActive ? (
                 <PybricksBlocksEditor
                   blockDocument={currentBlockDocument}
                   socket={socket}
                   socketProjectId={socketProjectId}
-                  canEdit={canEdit}
+                  canEdit={editorCanEdit}
                   presence={presence}
                   currentUserId={user?.id}
                   followPresence={
@@ -5070,21 +5241,38 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
                   showGeneratedCode={showGeneratedBlockCode}
                 />
               ) : (
+                // Remount per file to keep undo history and other editor state isolated between files.
                 <CodeMirror
+                  key={currentFile?.id ?? "no-file"}
                   height="100%"
                   value={currentFile?.content || ""}
                   extensions={extensions}
                   theme={editorTheme}
-                  readOnly={!canEdit}
+                  readOnly={!editorCanEdit}
                   onCreateEditor={(view) => (editorViewRef.current = view)}
                   onUpdate={onUpdate}
-                  basicSetup={{ lineNumbers: true, foldGutter: true, highlightActiveLine: true, autocompletion: false }}
+                  basicSetup={{ lineNumbers: true, foldGutter: false, highlightActiveLine: true, autocompletion: false }}
                 />
               )}
             </div>
+            {editorDisconnected && (
+              <div className="editor-disconnect-blocker" role="alertdialog" aria-modal="true" aria-labelledby="editor-disconnect-title">
+                <div className="editor-disconnect-panel">
+                  <FiWifiOff className="editor-disconnect-icon" aria-hidden="true" />
+                  <div className="editor-disconnect-copy">
+                    <h2 id="editor-disconnect-title">Editor disconnected</h2>
+                    <p>Refresh before editing. Changes made while disconnected will not sync and can be lost.</p>
+                  </div>
+                  <button className="btn btn-primary editor-disconnect-refresh" onClick={handleRefreshEditor} type="button">
+                    <FiRefreshCw size={16} /> Refresh editor
+                  </button>
+                </div>
+              </div>
+            )}
             <ProjectSearch
               open={projectSearchOpen}
               files={files}
+              currentFileId={activeEditorKind === "file" ? currentFileId : null}
               onClose={() => setProjectSearchOpen(false)}
               onSelect={openProjectSearchResult}
             />
@@ -5237,15 +5425,20 @@ export default function EditorPage({ user, onLogout, theme, toggleTheme, editorT
         {/* Status Bar */}
         <div className="editor-statusbar">
           <div className="editor-statusbar-left">
-            <span className={`editor-statusbar-indicator ${wsConnected ? "connected" : "disconnected"}`}>
-              {wsConnected ? <FiWifi size={12} /> : <FiWifiOff size={12} />}
-              {wsConnected ? "Connected" : "Disconnected"}
+            <span className={`editor-statusbar-indicator ${editorDisconnected ? "disconnected" : "connected"}`}>
+              {editorDisconnected ? <FiWifiOff size={12} /> : <FiWifi size={12} />}
+              {editorDisconnected ? "Disconnected" : "Connected"}
             </span>
+            {editorDisconnected && (
+              <span className="editor-statusbar-refresh-prompt" role="alert">
+                Refresh now before editing so your changes stay synced.
+              </span>
+            )}
           </div>
           <div className="editor-statusbar-right">
-            {!wsConnected && (
-              <button className="editor-statusbar-reconnect" onClick={handleReconnect}>
-                <FiRefreshCw size={12} /> Reconnect
+            {editorDisconnected && (
+              <button className="editor-statusbar-reconnect" onClick={handleRefreshEditor} type="button">
+                <FiRefreshCw size={12} /> Refresh
               </button>
             )}
             {currentFile?.name && <span className="editor-statusbar-file">{currentFile.name}</span>}

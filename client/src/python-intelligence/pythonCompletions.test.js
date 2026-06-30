@@ -104,6 +104,21 @@ test("import/def contexts insert a bare name, no call expansion", () => {
   assert.equal(descriptors[0].template, undefined);
 });
 
+test("from-import completions insert the resolved symbol and hide wildcard rows", () => {
+  const descriptors = buildCompletionOptions({
+    items: [
+      { name: "*", label: "*", kind: "statement", callable: false, signatures: [] },
+      callable("greet", []),
+    ],
+    importOrDef: true,
+    importContext: "from-import",
+  });
+
+  assert.deepEqual(descriptors.map((descriptor) => descriptor.label), ["greet"]);
+  assert.equal(descriptors[0].apply, "greet");
+  assert.equal(descriptors[0].template, undefined);
+});
+
 test("comma case: offers remaining keyword args, skipping ones already supplied", () => {
   const params = [{ label: "port" }, { label: "positive_direction=X" }, { label: "gears=None" }, { label: "reset_angle=True" }];
   const remaining = buildRemainingKeywordDescriptors(params, usedKeywordNames("port=Port.A, "));

@@ -2,7 +2,6 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import PartySocket from "partysocket";
 import { io } from "socket.io-client";
 import api, { API_BASE } from "../api";
-import { getToken } from "../auth";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
   FiMessageCircle,
@@ -18,10 +17,11 @@ import {
   FiChevronLeft,
 } from "react-icons/fi";
 import VerifiedBadge from "../components/VerifiedBadge";
+import { Skeleton, SkeletonText } from "../components/Skeleton";
+import { skeletonDebugEnabled } from "../utils/skeletonDebug";
 import { loadStoredUser } from "../session";
 import { toProfilePath } from "../utils/profileLinks";
 import { motion } from "framer-motion";
-import { resolveHostedAssetUrl } from "../utils/hostedAssets";
 
 const REALTIME_PARTY = import.meta.env.VITE_PARTYKIT_PARTY || "messages";
 const REALTIME_HOST = import.meta.env.VITE_PARTYKIT_HOST || (typeof window !== "undefined" ? window.location.host : "");
@@ -52,13 +52,80 @@ const mergeMessageLists = (current = [], incoming = []) => {
 
 const upsertMessage = (current = [], incoming) => mergeMessageLists(current, incoming ? [incoming] : []);
 
+function MessageListSkeleton() {
+  return (
+    <div className="messages-skeleton-list" aria-hidden="true">
+      {Array.from({ length: 7 }).map((_, index) => (
+        <div className="message-item skeleton-card" key={index}>
+          <Skeleton className="message-avatar" rounded />
+          <div className="message-meta">
+            <div className="message-row">
+              <Skeleton className="skeleton-heading-line" />
+              <Skeleton className="skeleton-tiny-line" />
+            </div>
+            <Skeleton className="skeleton-short-line" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function ThreadSkeleton() {
+  return (
+    <div className="thread-content" aria-hidden="true">
+      <div className="panel-header thread-header">
+        <div className="thread-user">
+          <Skeleton className="message-avatar large" rounded />
+          <div>
+            <Skeleton className="skeleton-heading-line" />
+            <Skeleton className="skeleton-short-line" />
+          </div>
+        </div>
+      </div>
+      <div className="thread-body">
+        <div className="thread-messages skeleton-thread-messages">
+          {Array.from({ length: 6 }).map((_, index) => (
+            <div key={index} className={`message-bubble skeleton-message-bubble ${index % 2 ? "sent" : "received"}`}>
+              <SkeletonText lines={index % 3 === 0 ? 2 : 1} />
+            </div>
+          ))}
+        </div>
+        <div className="thread-input">
+          <Skeleton className="skeleton-input-line" />
+          <Skeleton className="skeleton-icon-button" rounded />
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function UserSearchSkeleton() {
+  return (
+    <div className="messages-search-results" aria-hidden="true">
+      {Array.from({ length: 3 }).map((_, index) => (
+        <div className="search-result skeleton-card" key={index}>
+          <Skeleton className="message-avatar" rounded />
+          <div className="message-meta">
+            <Skeleton className="skeleton-heading-line" />
+            <Skeleton className="skeleton-short-line" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
+
 export default function Messages({ user }) {
   const location = useLocation();
   const navigate = useNavigate();
   const { conversationId: routeConversationId } = useParams();
   const currentUser = user || loadStoredUser();
+  const showSkeletons = skeletonDebugEnabled();
   const [inbox, setInbox] = useState([]);
   const [requests, setRequests] = useState([]);
+  const [loadingInbox, setLoadingInbox] = useState(true);
+  const [loadingRequests, setLoadingRequests] = useState(true);
   const [activeTab, setActiveTab] = useState("inbox");
   const [activeConversationId, setActiveConversationId] = useState(null);
   const [conversationDetail, setConversationDetail] = useState(null);
@@ -93,6 +160,8 @@ export default function Messages({ user }) {
   const previousConversationIdRef = useRef(null);
   const previousMessageCountRef = useRef(0);
   const isSendingRef = useRef(false);
+  const inboxLoadedRef = useRef(false);
+  const requestsLoadedRef = useRef(false);
 
   useEffect(() => {
     currentUserRef.current = currentUser;
@@ -113,6 +182,7 @@ export default function Messages({ user }) {
   }, []);
 
   const loadInbox = useCallback(async () => {
+    if (!inboxLoadedRef.current) setLoadingInbox(true);
     try {
       const res = await api.get("/messages/inbox");
       setError("");
@@ -130,10 +200,14 @@ export default function Messages({ user }) {
     } catch (err) {
       console.error(err);
       setError("Failed to load inbox.");
+    } finally {
+      inboxLoadedRef.current = true;
+      setLoadingInbox(false);
     }
   }, []);
 
   const loadRequests = useCallback(async () => {
+    if (!requestsLoadedRef.current) setLoadingRequests(true);
     try {
       const res = await api.get("/messages/requests");
       setError("");
@@ -141,6 +215,9 @@ export default function Messages({ user }) {
     } catch (err) {
       console.error(err);
       setError("Failed to load requests.");
+    } finally {
+      requestsLoadedRef.current = true;
+      setLoadingRequests(false);
     }
   }, []);
 
@@ -216,7 +293,7 @@ export default function Messages({ user }) {
   }, [searchQuery, newMessageOpen, currentUser?.id]);
 
   useEffect(() => {
-    const token = getToken();
+    const token = localStorage.getItem("token");
     if (!token) return;
     const socket = io(`${API_BASE}/messages`, {
       path: "/socket.io",
@@ -515,7 +592,8 @@ export default function Messages({ user }) {
 
   const resolveAvatar = (path) => {
     if (!path) return null;
-    return resolveHostedAssetUrl(path);
+    if (path.startsWith("http") || path.startsWith("data:")) return path;
+    return `${API_BASE}${path}`;
   };
 
   const updateInboxPreview = (conversationId, body, createdAt, options = {}) => {
@@ -909,14 +987,16 @@ export default function Messages({ user }) {
         </div>
         {error && <div className="messages-error">{error}</div>}
         <div className="panel-body messages-list">
-          {activeTab === "inbox" && inbox.length === 0 && (
+          {activeTab === "inbox" && (loadingInbox || showSkeletons) && <MessageListSkeleton />}
+          {activeTab === "requests" && (loadingRequests || showSkeletons) && <MessageListSkeleton />}
+          {activeTab === "inbox" && !loadingInbox && !showSkeletons && inbox.length === 0 && (
             <div className="messages-empty">No conversations yet.</div>
           )}
-          {activeTab === "requests" && requests.length === 0 && (
+          {activeTab === "requests" && !loadingRequests && !showSkeletons && requests.length === 0 && (
             <div className="messages-empty">No requests pending.</div>
           )}
-          {activeTab === "inbox" && inbox.map(renderConversationItem)}
-          {activeTab === "requests" && requests.map(renderRequestItem)}
+          {activeTab === "inbox" && !loadingInbox && !showSkeletons && inbox.map(renderConversationItem)}
+          {activeTab === "requests" && !loadingRequests && !showSkeletons && requests.map(renderRequestItem)}
         </div>
       </div>
 
@@ -929,11 +1009,9 @@ export default function Messages({ user }) {
           </div>
         )}
 
-        {activeConversationId && loadingThread && (
-          <div className="thread-empty">Loading conversation...</div>
-        )}
+        {activeConversationId && (loadingThread || showSkeletons) && <ThreadSkeleton />}
 
-        {activeConversationId && conversationDetail && (
+        {activeConversationId && !loadingThread && !showSkeletons && conversationDetail && (
           <div className="thread-content">
             <div className="panel-header thread-header">
               <div className="thread-user">
@@ -1106,12 +1184,13 @@ export default function Messages({ user }) {
                   }}
                 />
               </div>
-              {searchLoading && <div className="messages-empty">Searching...</div>}
-              {!searchLoading && searchResults.length === 0 && searchQuery && (
+              {(searchLoading || showSkeletons) && <UserSearchSkeleton />}
+              {!searchLoading && !showSkeletons && searchResults.length === 0 && searchQuery && (
                 <div className="messages-empty">No users found.</div>
               )}
-              <div className="messages-search-results">
-                {searchResults.map((result) => (
+              {!searchLoading && !showSkeletons && (
+                <div className="messages-search-results">
+                  {searchResults.map((result) => (
                   <button
                     key={result.id}
                     className={`search-result ${selectedUser?.id === result.id ? "active" : ""}`}
@@ -1135,8 +1214,9 @@ export default function Messages({ user }) {
                       <div className="message-preview">@{result.username}</div>
                     </div>
                   </button>
-                ))}
-              </div>
+                  ))}
+                </div>
+              )}
               <textarea
                 className="input"
                 rows={3}
